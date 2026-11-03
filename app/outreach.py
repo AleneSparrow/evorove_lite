@@ -24,7 +24,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
 from uuid import uuid4
 
-from . import guards
+from . import billing, guards
 from .db import ROOT, connect, now
 from .settings import decrypt_password, load
 
@@ -105,16 +105,6 @@ def ask(system: str, user: str, *, schema: dict | None = None, web_search: bool 
     return delegate(system, user, schema=schema, web_search=web_search, max_uses=max_uses, purpose=purpose)
 
 
-def payment_link_for(business, person_id: str) -> str:
-    """Stand-in for billing.payment_link_for while the glue agent's version is
-    unmerged. Same signature, so the merge replaces this whole function with:
-    from .billing import payment_link_for
-    """
-    try:
-        from .billing import payment_link_for as delegate
-    except ImportError:
-        return (business['payment_link'] or '').strip()
-    return delegate(business, person_id)
 
 
 def settings_or_default(settings):
@@ -236,7 +226,7 @@ def compose_reply(business, person, inbound, analysis, move, *, llm=None):
     ok, _ = validate(text, move, facts)
     body = text.strip() if ok else SAFE_FALLBACK[move]
     if move == OFFER:
-        body = body + '\n\n' + business['offer_text'].strip() + '\n\n' + payment_link_for(business, person['id'])
+        body = body + '\n\n' + business['offer_text'].strip() + '\n\n' + billing.payment_link_for(business, person['id'])
     return body + '\n\n' + (business['sender_name'] or business['name'] or '').strip()
 
 
@@ -264,7 +254,11 @@ def imap_fetch(target, last_uid, last_uidvalidity=None):
     try:
         client.login(target['user'], target['password'])
         client.select('INBOX', readonly=True)
-        uidvalidity = int((client.untagged_responses.get('UIDVALIDITY') or [b'0'])[0])
+        # getattr/.get, not an attribute/index access: a minimal IMAP4_SSL test
+        # double (real imaplib always has this) still gets a valid, if inert,
+        # uidvalidity of 0 instead of an AttributeError.
+        untagged = getattr(client, 'untagged_responses', {}) or {}
+        uidvalidity = int((untagged.get('UIDVALIDITY') or [b'0'])[0])
         reset = last_uid is not None and last_uidvalidity is not None and uidvalidity != last_uidvalidity
         if last_uid is None:
             _, data = client.uid('SEARCH', None, 'ALL')

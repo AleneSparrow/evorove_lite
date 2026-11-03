@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from app import guards, outreach
+from app import billing, guards, outreach
 from app.db import connect
 from test_guards import DAYTIME, EVENING, make_business, make_person, settings  # noqa: F401
 
@@ -498,13 +498,25 @@ def test_record_payment_can_join_an_open_transaction(settings):
     assert people(settings)[0]['stage'] == 'done'
 
 
-def test_the_payment_link_seam_matches_the_contract_signature():
-    import inspect
-    signature = inspect.signature(outreach.payment_link_for)
-    assert list(signature.parameters) == ['business', 'person_id']
-    # Falls back to the raw link while billing.payment_link_for is unmerged.
-    assert outreach.payment_link_for({'payment_link': ' https://pay.example.com/acme '}, 'person-1') \
-        == 'https://pay.example.com/acme'
+def test_the_offer_uses_billings_real_payment_link_for(settings):
+    """billing.py is merged now: outreach.py calls it through the module
+    reference (billing.payment_link_for), not a local stand-in."""
+    assert outreach.billing.payment_link_for is not None
+    make_business(settings)
+    person = make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    with connect(settings.db_path) as db:
+        db.execute("INSERT INTO messages(id,person_id,direction,subject,body,move,created_at)"
+                   " VALUES (?,?,'out','s','b','confirm_need','2026-11-03T12:00:00+00:00')",
+                   (str(uuid4()), person['id']))
+    llm = stub_llm(analysis={'problem': 'p', 'desired_outcome': 'o', 'ready': True})
+    outreach.poll_replies('biz-1', settings=settings, send=smtp,
+                          fetch=fake_imap([inbound('Send me the link.')]), llm=llm)
+    letter = smtp.bodies[-1]
+    # billing.payment_link_for carries custom_data so the webhook can close this exact card.
+    assert billing.payment_link_for({'payment_link': 'https://pay.example.com/acme', 'id': 'biz-1'},
+                                    person['id']) in letter
 
 
 # --- the IMAP cursor: stored on businesses, resilient to UIDVALIDITY changes -
