@@ -78,6 +78,32 @@ def test_board_person_timeline_and_tenant_isolation(client, settings):
     assert client.get('/app?person=' + other_pid).status_code == 404
 
 
+def test_owner_can_confirm_manual_payment(client, settings, monkeypatch):
+    signup(client)
+    bid = business(settings)['id']
+    pid = add_person(settings, bid, stage='offer_made')
+    detail = client.get('/app/people/' + pid)
+    assert 'Record payment' in detail.text
+    assert 'I confirm this payment was received.' in detail.text
+    assert form(client, '/app/people/' + pid, '/app/people/' + pid + '/payment').status_code == 400
+
+    calls = []
+    def record_payment(business_id, person_id, source):
+        calls.append((business_id, person_id, source))
+        with connect(settings.db_path) as db:
+            db.execute("UPDATE people SET stage='done',updated_at=? WHERE id=? AND business_id=?",
+                       (now(), person_id, business_id))
+    monkeypatch.setattr('app.main.outreach.record_payment', record_payment)
+    response = form(client, '/app/people/' + pid, '/app/people/' + pid + '/payment', confirm='yes')
+    assert response.status_code == 200
+    assert 'Record payment' not in response.text
+    assert calls == [(bid, pid, 'manual')]
+    with connect(settings.db_path) as db:
+        assert db.execute('SELECT stage FROM people WHERE id=?', (pid,)).fetchone()[0] == 'done'
+        assert db.execute("SELECT count(*) FROM payments WHERE raw_event_id=?",
+                          (f'manual:{bid}:{pid}',)).fetchone()[0] == 1
+
+
 def test_settings_validation_and_no_password_echo(client, settings):
     signup(client)
     fields = {'postal_address': '12 Main Street, Austin TX', 'daily_cap': '20', 'quiet_start': '20:00', 'quiet_end': '08:00', 'outreach_paused': 'on'}
@@ -112,6 +138,54 @@ def test_find_people_runs_in_background_and_surfaces_failure(client, settings, m
     status = client.get('/app/search-status')
     assert 'failed' in status.text and 'RuntimeError' in status.text
     assert 'SECRET-MUST-NOT-LEAK' not in status.text
+
+
+def test_search_preview_is_dry_run_and_has_no_send_actions(client, settings, monkeypatch):
+    signup(client)
+    bid = business(settings)['id']
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE businesses SET subscription_status='active',brief='US service founders'")
+    calls = []
+    candidates = [{
+        'company': 'North Star LLC', 'website': 'https://north.example', 'us_state': 'TX',
+        'name': 'Ana Doe', 'role': 'Founder', 'pain': 'Slow lead follow-up',
+        'evidence_quote': 'We need a faster response process.',
+        'source_url': 'https://north.example/about', 'segment': 'B2B services',
+    }]
+    def run_search(business_id, *, limit=20, dry_run=False):
+        calls.append((business_id, limit, dry_run))
+        return candidates
+    monkeypatch.setattr('app.main.search.run_search', run_search)
+
+    assert 'Preview 20 people' in client.get('/app/search-preview').text
+    assert form(client, '/app/search-preview').status_code == 303
+    async def finish():
+        await asyncio.gather(*list(client.app.state.search_preview_tasks))
+    client.portal.call(finish)
+    page = client.get('/app/search-preview')
+    assert calls == [(bid, 20, True)]
+    for value in ('North Star LLC', 'Ana Doe', 'Slow lead follow-up',
+                  'We need a faster response process.', 'B2B services'):
+        assert value in page.text
+    assert 'Send' not in page.text and 'Find people' not in page.text
+    with connect(settings.db_path) as db:
+        assert db.execute('SELECT count(*) FROM people').fetchone()[0] == 0
+
+
+def test_search_preview_failure_hides_exception_message(client, settings, monkeypatch):
+    signup(client)
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE businesses SET subscription_status='active',brief='US founders'")
+    def fail(*args, **kwargs):
+        raise RuntimeError('SECRET-MUST-NOT-LEAK')
+    monkeypatch.setattr('app.main.search.run_search', fail)
+    assert form(client, '/app/search-preview').status_code == 303
+    async def finish():
+        await asyncio.gather(*list(client.app.state.search_preview_tasks))
+    client.portal.call(finish)
+    page = client.get('/app/search-preview')
+    assert 'Preview failed (RuntimeError)' in page.text
+    assert 'SECRET-MUST-NOT-LEAK' not in page.text
 
 
 def test_public_pages_and_unsubscribe(client, settings):

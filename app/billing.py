@@ -3,17 +3,33 @@ import hmac
 import json
 from datetime import datetime, timezone
 from uuid import uuid4
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 from fastapi import HTTPException
 
 from .db import connect, now
+from . import outreach
 
 EVENTS = {"subscription_created", "subscription_updated", "subscription_cancelled",
           "subscription_resumed", "subscription_expired", "subscription_paused", "subscription_unpaused"}
 INVOICES = {"subscription_payment_success", "subscription_payment_recovered", "subscription_payment_failed"}
+ORDERS = {"order_created"}
 STATUSES = {"on_trial", "active", "paused", "past_due", "unpaid", "cancelled", "expired"}
+
+
+def payment_link_for(business, person_id: str) -> str:
+    """Attach tenant-scoped checkout custom data to one person's offer URL."""
+    raw = str(business.get("payment_link") or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.hostname or not person_id:
+        return raw
+    custom = {"checkout[custom][business_id]", "checkout[custom][person_id]"}
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+             if key not in custom]
+    query.extend((("checkout[custom][business_id]", str(business["id"])),
+                  ("checkout[custom][person_id]", str(person_id))))
+    return urlunparse(parsed._replace(query=urlencode(query)))
 
 
 def checkout(settings, user, plan):
@@ -56,24 +72,29 @@ def webhook(settings, payload, signature):
         event = json.loads(payload)
         meta, data = event["meta"], event["data"]
         name = meta["event_name"]
-        if name not in EVENTS | INVOICES:
+        if name not in EVENTS | INVOICES | ORDERS:
             return
         attributes = data["attributes"]
         if name in EVENTS:
             if data["type"] != "subscriptions" or attributes["status"] not in STATUSES:
                 raise ValueError()
-        elif data["type"] != "subscription-invoices":
+        elif name in INVOICES and data["type"] != "subscription-invoices":
             raise ValueError()
-        stamp = datetime.fromisoformat(attributes["updated_at"].replace("Z", "+00:00"))
+        elif name in ORDERS and data["type"] != "orders":
+            raise ValueError()
+        stamp_value = attributes.get("updated_at") or attributes.get("created_at")
+        stamp = datetime.fromisoformat(stamp_value.replace("Z", "+00:00"))
         if stamp.tzinfo is None:
             raise ValueError()
         stamp = stamp.astimezone(timezone.utc).isoformat()
-        business_id = (meta.get("custom_data") or {}).get("business_id")
+        custom_data = meta.get("custom_data") or {}
+        business_id = custom_data.get("business_id")
+        person_id = custom_data.get("person_id")
         event_id = str(meta.get("event_id") or hashlib.sha256(payload).hexdigest())
         if not all(isinstance(container.get("test_mode", False), bool) for container in (meta, attributes)):
             raise ValueError()
         test = meta.get("test_mode", False) or attributes.get("test_mode", False)
-        subscription = str(data["id"] if name in EVENTS else attributes["subscription_id"])
+        subscription = str(data["id"] if name in EVENTS else attributes["subscription_id"]) if name not in ORDERS else None
     except (ValueError, KeyError, TypeError, AttributeError):
         raise HTTPException(400, "Malformed billing event") from None
     with connect(settings.db_path) as db:
@@ -81,7 +102,7 @@ def webhook(settings, payload, signature):
         if db.execute("SELECT 1 FROM billing_events WHERE event_id=?", (event_id,)).fetchone():
             return
         business = db.execute("SELECT * FROM businesses WHERE id=?", (business_id,)).fetchone() if business_id else None
-        if not business:
+        if not business and subscription:
             business = db.execute("SELECT * FROM businesses WHERE ls_subscription_id=?", (subscription,)).fetchone()
         if not business:
             return
@@ -100,8 +121,25 @@ def webhook(settings, payload, signature):
                 amount = attributes.get("total")
                 if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
                     raise HTTPException(400, "Invalid payment amount")
-                db.execute("INSERT OR IGNORE INTO payments(id,business_id,source,event_name,test_mode,amount_cents,raw_event_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
-                           (str(uuid4()), business_id, "lemonsqueezy", name, int(test), amount, "invoice:" + str(data["id"]), now()))
+                inserted = db.execute("INSERT OR IGNORE INTO payments(id,business_id,person_id,source,event_name,test_mode,amount_cents,raw_event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                                      (str(uuid4()), business_id, person_id, "lemonsqueezy", name, int(test), amount, "invoice:" + str(data["id"]), now()))
+                if inserted.rowcount and name == "subscription_payment_success" and person_id:
+                    try:
+                        outreach.record_payment(business_id, person_id, "lemonsqueezy", db=db)
+                    except ValueError:
+                        pass
+            return
+        if name in ORDERS:
+            amount = attributes.get("total")
+            if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
+                raise HTTPException(400, "Invalid payment amount")
+            inserted = db.execute("INSERT OR IGNORE INTO payments(id,business_id,person_id,source,event_name,test_mode,amount_cents,raw_event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                                  (str(uuid4()), business_id, person_id, "lemonsqueezy", name, int(test), amount, "order:" + str(data["id"]), now()))
+            if inserted.rowcount and person_id:
+                try:
+                    outreach.record_payment(business_id, person_id, "lemonsqueezy", db=db)
+                except ValueError:
+                    pass
             return
         variants = {settings.get("LEMONSQUEEZY_VARIANT_STARTER"): "starter", settings.get("LEMONSQUEEZY_VARIANT_PRO"): "pro"}
         plan = variants.get(str(attributes.get("variant_id")))

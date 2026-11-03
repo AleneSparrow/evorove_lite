@@ -57,12 +57,42 @@ def deliver(client, settings, event):
 
 
 def test_migrations_and_health(client, settings):
-    assert client.get('/health').json() == {'status': 'ok'}
+    assert client.get('/health').json() == {
+        'status': 'ok',
+        'scheduler': {kind: {'last_success_at': None}
+                      for kind in ('search', 'send', 'poll', 'summary')},
+        'stale': True,
+    }
     migrate(settings.db_path)
     with connect(settings.db_path) as db:
         assert db.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert db.execute('PRAGMA foreign_keys').fetchone()[0] == 1
         assert db.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 3
+
+
+def test_health_reports_last_success_and_search_freshness(client, settings):
+    fresh = datetime.now(timezone.utc) - timedelta(hours=25)
+    old = fresh - timedelta(days=2)
+    with connect(settings.db_path) as db:
+        db.execute("INSERT INTO runs(id,kind,started_at,finished_at,status) VALUES ('search-old','search',?,?,'ok')",
+                   (old.isoformat(), old.isoformat()))
+        db.execute("INSERT INTO runs(id,kind,started_at,finished_at,status) VALUES ('search-failed','search',?,?,'failed')",
+                   (now(), now()))
+        db.execute("INSERT INTO runs(id,kind,started_at,finished_at,status) VALUES ('search-fresh','search',?,?,'ok')",
+                   (fresh.isoformat(), fresh.isoformat()))
+        db.execute("INSERT INTO runs(id,kind,started_at,finished_at,status) VALUES ('poll-ok','poll',?,?,'ok')",
+                   (old.isoformat(), old.isoformat()))
+    health = client.get('/health').json()
+    assert health['status'] == 'ok'
+    assert health['stale'] is False
+    assert health['scheduler']['search']['last_success_at'] == fresh.isoformat()
+    assert health['scheduler']['poll']['last_success_at'] == old.isoformat()
+    assert health['scheduler']['send']['last_success_at'] is None
+
+    stale = datetime.now(timezone.utc) - timedelta(hours=27)
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE runs SET finished_at=? WHERE id='search-fresh'", (stale.isoformat(),))
+    assert client.get('/health').json()['stale'] is True
 
 
 def test_signup_login_logout(client, settings):
@@ -81,6 +111,37 @@ def test_signup_login_logout(client, settings):
     assert 'Secure' in response.headers['set-cookie']
     assert 'HttpOnly' in response.headers['set-cookie']
     assert 'SameSite=lax' in response.headers['set-cookie']
+
+
+def test_legacy_pbkdf2_login_upgrades_hash(client, settings):
+    signup(client)
+    password = 'long password 123'
+    salt = bytes.fromhex('00112233445566778899aabbccddeeff')
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 390_000).hex()
+    legacy = f'pbkdf2_sha256$390000${salt.hex()}${digest}'
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE users SET password_hash=? WHERE email='owner@example.com'", (legacy,))
+
+    assert form(client, '/app', '/logout').status_code == 303
+    assert form(client, '/login', email='owner@example.com', password=password).status_code == 303
+    with connect(settings.db_path) as db:
+        upgraded = db.execute("SELECT password_hash FROM users WHERE email='owner@example.com'").fetchone()[0]
+    assert upgraded.startswith('$argon2id$')
+    assert upgraded != legacy
+
+
+def test_legacy_pbkdf2_rejects_wrong_password_without_rehash(client, settings):
+    signup(client)
+    salt = bytes.fromhex('00112233445566778899aabbccddeeff')
+    digest = hashlib.pbkdf2_hmac('sha256', b'long password 123', salt, 390_000).hex()
+    legacy = f'pbkdf2_sha256$390000${salt.hex()}${digest}'
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE users SET password_hash=? WHERE email='owner@example.com'", (legacy,))
+
+    assert form(client, '/app', '/logout').status_code == 303
+    assert form(client, '/login', email='owner@example.com', password='wrong password 456').status_code == 401
+    with connect(settings.db_path) as db:
+        assert db.execute("SELECT password_hash FROM users WHERE email='owner@example.com'").fetchone()[0] == legacy
 
 
 def test_password_validation_csrf_and_duplicates(client, settings):
@@ -152,6 +213,77 @@ def test_checkout(client, settings, monkeypatch):
     assert response.headers['location'].startswith('https://shop.lemonsqueezy.com/')
     assert captured[0]['data']['attributes']['checkout_data']['custom']['business_id'] == business(settings)['id']
     assert form(client, '/app', '/billing/checkout/fake').status_code == 400
+
+
+def test_payment_link_for_scopes_checkout_to_person():
+    url = billing.payment_link_for(
+        {'id': 'business-1', 'payment_link': 'https://store.example/checkout/buy?discount=SAVE'},
+        'person-1',
+    )
+    query = parse_qs(urlparse(url).query)
+    assert query == {
+        'discount': ['SAVE'],
+        'checkout[custom][business_id]': ['business-1'],
+        'checkout[custom][person_id]': ['person-1'],
+    }
+
+
+@pytest.mark.parametrize('event_name,data_type,data_id', [
+    ('subscription_payment_success', 'subscription-invoices', 'invoice-person-1'),
+    ('order_created', 'orders', 'order-person-1'),
+])
+def test_payment_event_records_done_in_same_transaction(client, settings, monkeypatch,
+                                                        event_name, data_type, data_id):
+    signup(client)
+    bid = business(settings)['id']
+    with connect(settings.db_path) as db:
+        pid = 'person-payment-1'
+        db.execute('INSERT INTO people(id,business_id,email,pain,evidence_quote,source_url,stage,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                   (pid, bid, 'buyer@example.com', 'Need', 'Quoted need',
+                    'https://example.com/source', 'offer_made', now(), now()))
+    if event_name.startswith('subscription_'):
+        assert deliver(client, settings, event(bid)).status_code == 200
+
+    calls = []
+    def record_payment(business_id, person_id, source, *, db=None):
+        assert db is not None
+        assert db.execute('SELECT id FROM businesses WHERE id=?', (business_id,)).fetchone()
+        calls.append((business_id, person_id, source))
+        db.execute("UPDATE people SET stage='done',updated_at=? WHERE id=? AND business_id=?",
+                   (now(), person_id, business_id))
+    monkeypatch.setattr(billing.outreach, 'record_payment', record_payment)
+    attributes = {'total': 4900, 'updated_at': '2026-11-03T11:00:00Z', 'test_mode': False}
+    if data_type == 'subscription-invoices':
+        attributes['subscription_id'] = 'sub-1'
+    payment_event = {
+        'meta': {'event_name': event_name, 'event_id': 'event-' + data_id,
+                 'custom_data': {'business_id': bid, 'person_id': pid}, 'test_mode': False},
+        'data': {'type': data_type, 'id': data_id, 'attributes': attributes},
+    }
+    assert deliver(client, settings, payment_event).status_code == 200
+    assert deliver(client, settings, payment_event).status_code == 200
+    assert calls == [(bid, pid, 'lemonsqueezy')]
+    with connect(settings.db_path) as db:
+        payment = db.execute('SELECT person_id,source FROM payments').fetchone()
+        assert tuple(payment) == (pid, 'lemonsqueezy')
+        assert db.execute('SELECT stage FROM people WHERE id=?', (pid,)).fetchone()[0] == 'done'
+
+
+def test_test_payment_event_obeys_email_allowlist(client, settings, monkeypatch):
+    signup(client, 'stranger@example.com')
+    bid = business(settings)['id']
+    called = []
+    monkeypatch.setattr(billing.outreach, 'record_payment', lambda *args, **kwargs: called.append(args))
+    payment_event = {
+        'meta': {'event_name': 'order_created', 'event_id': 'test-order-event',
+                 'custom_data': {'business_id': bid, 'person_id': 'unknown'}, 'test_mode': True},
+        'data': {'type': 'orders', 'id': 'test-order', 'attributes': {
+            'total': 100, 'created_at': '2026-11-03T11:00:00Z', 'test_mode': True}},
+    }
+    assert deliver(client, settings, payment_event).status_code == 200
+    assert called == []
+    with connect(settings.db_path) as db:
+        assert db.execute('SELECT count(*) FROM payments').fetchone()[0] == 0
 
 
 def test_staff_cannot_access_owner_pages(client, settings):
