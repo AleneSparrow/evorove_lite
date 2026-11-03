@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from . import billing, notify, outreach, search
+from . import billing, guards, notify, outreach, search
 from .db import connect, now, current_run_id
 
 PAID = {'active', 'on_trial'}
@@ -40,7 +40,8 @@ class Scheduler:
         context_token = current_run_id.set(run_id)
         try:
             if kind == 'search':
-                day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                # Same owner-local day as the first-letter cap (TIMEZONE_OWNER), not a UTC day.
+                day = guards._owner_day_start(self.settings, datetime.now(timezone.utc))
                 with connect(self.settings.db_path) as db:
                     used = db.execute("SELECT count(*) FROM people WHERE business_id=? AND source_url!='owner' AND created_at>=?",
                                       (business_id, day)).fetchone()[0]

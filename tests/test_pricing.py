@@ -214,3 +214,45 @@ def test_pro_daily_search_limit_excludes_owner_contacts(client, settings, monkey
     run = jobs.claim(bid,'search')
     jobs.execute(run,bid,'search')
     assert calls == [1]
+
+
+def test_pro_search_limit_counts_the_owner_local_day_not_the_utc_day(client, settings, monkeypatch):
+    """TIMEZONE_OWNER defaults to Asia/Ho_Chi_Minh (UTC+7): its day starts at 17:00 UTC."""
+    signup(client)
+    activate(settings, 'pro')
+    bid = business(settings)['id']
+    moment = datetime(2026, 11, 3, 18, 0, tzinfo=timezone.utc)  # 01:00 on 4 Nov for the owner
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(scheduler, 'datetime', Clock)
+    calls = []
+    monkeypatch.setattr(scheduler.search, 'run_search', lambda bid, **kwargs: calls.append(kwargs.get('limit', 20)) or [])
+
+    def seed(created_at):
+        with connect(settings.db_path) as db:
+            db.execute('DELETE FROM people')
+            for n in range(20):
+                db.execute("INSERT INTO people(id,business_id,email,pain,evidence_quote,source_url,stage,created_at,updated_at) "
+                           "VALUES (?,?,?,?,?,?,'cold',?,?)", (f'p{n}', bid, f'p{n}@example.com', 'pain', 'quote',
+                                                                'https://example.com/evidence', created_at, created_at))
+
+    def run_search_job():
+        jobs = scheduler.Scheduler(settings)
+        jobs.execute(jobs.claim(bid, 'search'), bid, 'search')
+
+    seed('2026-11-03T10:00:00+00:00')  # UTC "today", but yesterday for the owner: a full allowance again
+    run_search_job()
+    assert calls == [20]
+    seed('2026-11-03T17:30:00+00:00')  # after the owner's midnight: the allowance is spent
+    run_search_job()
+    assert calls == [20]
+
+
+def test_pro_card_and_faq_promise_twenty_verified_leads_a_day(client):
+    landing, faq = client.get('/').text, client.get('/faq').text
+    assert 'Up to 20 verified new leads a day' in landing and 'around 20' not in landing
+    assert 'up to 20 verified new leads a day' in faq and 'around 20' not in faq
