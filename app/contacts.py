@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
+from . import outreach
 from .auth import email_address
 from .db import connect, now
 
@@ -63,6 +64,8 @@ def add(settings, business_id, rows):
                 reason = 'Extra columns or field too long (note: maximum 500 characters)'
             if not reason and not values['note']:
                 reason = 'Note is required: explain the reason for the first email'
+            if not reason and not outreach.validate(values['note'], outreach.GREET, '')[0]:
+                reason = 'Note contains a link, price or discount — remove it'
             if not reason and values['website']:
                 try:
                     parsed = urlparse(values['website'])

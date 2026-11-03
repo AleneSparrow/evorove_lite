@@ -18,6 +18,23 @@ ORDERS = {"order_created"}
 STATUSES = {"on_trial", "active", "paused", "past_due", "unpaid", "cancelled", "expired"}
 
 
+def utc_date(value):
+    """Accept only timezone-aware timestamps; invalid provider values fail closed."""
+    try:
+        stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return stamp.astimezone(timezone.utc) if stamp.tzinfo is not None else None
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def entitled(business, current=None):
+    if business['subscription_status'] == 'active':
+        return True
+    ends = utc_date(business['subscription_ends_at'])
+    return (business['subscription_status'] == 'cancelled' and ends is not None
+            and (current or datetime.now(timezone.utc)) < ends)
+
+
 def payment_link_for(business, person_id: str) -> str:
     """Attach tenant-scoped checkout custom data to one person's offer URL."""
     raw = str(business.get("payment_link") or "").strip()
@@ -159,13 +176,15 @@ def webhook(settings, payload, signature):
         if business["ls_subscription_id"] and business["ls_subscription_id"] != subscription:
             if name != "subscription_created" or business["subscription_status"] != "expired":
                 return
-        db.execute("UPDATE businesses SET plan=?,subscription_status=?,ls_customer_id=?,ls_subscription_id=? WHERE id=?",
-                   (plan, attributes["status"], str(attributes.get("customer_id", "")), subscription, business_id))
+        ends = utc_date(attributes.get("ends_at")) if attributes["status"] == "cancelled" else None
+        db.execute("UPDATE businesses SET plan=?,subscription_status=?,ls_customer_id=?,ls_subscription_id=?,subscription_ends_at=? WHERE id=?",
+                   (plan, attributes["status"], str(attributes.get("customer_id", "")), subscription,
+                    ends.isoformat() if ends else None, business_id))
         db.execute("INSERT INTO log(business_id,event,detail,created_at) VALUES (?,'billing_applied',?,?)", (business_id, stamp, now()))
 
 
-def can_search(business):
-    return business['plan'] == 'pro' and business['subscription_status'] == 'active'
+def can_search(business, current=None):
+    return business['plan'] == 'pro' and entitled(business, current)
 
 
 def require_search(business):

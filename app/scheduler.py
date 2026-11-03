@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 from . import billing, guards, notify, outreach, search
 from .db import connect, now, current_run_id
 
-PAID = {'active', 'on_trial'}
 US_ZONES = ('America/New_York', 'America/Chicago', 'America/Denver', 'America/Phoenix',
             'America/Los_Angeles', 'America/Anchorage', 'Pacific/Honolulu')
 
@@ -86,11 +85,11 @@ class Scheduler:
         with connect(self.settings.db_path) as db:
             businesses = [dict(row) for row in db.execute('SELECT * FROM businesses')]
         for business in businesses:
-            if business['subscription_status'] not in PAID or business['outreach_paused']:
+            if not billing.entitled(business, current) or business['outreach_paused']:
                 continue
             bid = business['id']
             day = current.replace(hour=0, minute=0, second=0, microsecond=0)
-            if current.hour >= 13 and billing.can_search(business):
+            if current.hour >= 13 and billing.can_search(business, current):
                 self.dispatch(bid, 'search', day.isoformat())
             for kind, interval in (('send', 15), ('poll', 5)):
                 # Scheduler opens a US-wide window; guards check each recipient immediately before SMTP.

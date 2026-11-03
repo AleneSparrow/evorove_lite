@@ -286,7 +286,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         s = request.app.state.settings
         user = auth.current_user(s, request)
         business = board.business(s, user['business_id'])
-        if business['plan'] not in {'starter', 'pro'} or business['subscription_status'] != 'active':
+        if business['plan'] not in {'starter', 'pro'} or not billing.entitled(business):
             raise HTTPException(403, 'An active Starter or Pro subscription is required')
         rows = contacts.csv_rows(fields['csv']) if 'csv' in fields else [fields]
         report = await run_in_threadpool(contacts.add, s, user['business_id'], rows)
