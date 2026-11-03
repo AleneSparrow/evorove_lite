@@ -1,5 +1,6 @@
 """Tenant-scoped board queries and owner configuration."""
 import re
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
@@ -72,6 +73,67 @@ def save_settings(settings, business_id, fields):
             values[protocol + '_password_enc'] = encrypt_password(settings, password)
     with connect(settings.db_path) as db:
         db.execute('UPDATE businesses SET ' + ','.join(key + '=?' for key in values) + ' WHERE id=?', (*values.values(), business_id))
+
+
+FUNNEL = (
+    ('found', 'Found'),
+    ('letters', 'First letters'),
+    ('replies', 'Replied'),
+    ('offers', 'Reached an offer'),
+    ('paid', 'Paid'),
+    ('unsubscribed', 'Unsubscribed'),
+)
+USAGE = (('tokens', 'Tokens'), ('searches', 'Searches'))
+
+
+def _window_starts(current):
+    moment = current.astimezone(timezone.utc)
+    return (
+        ('Today', moment.replace(hour=0, minute=0, second=0, microsecond=0)),
+        ('7 days', moment - timedelta(days=7)),
+        ('30 days', moment - timedelta(days=30)),
+    )
+
+
+def _since_counts(db, business_id, since):
+    people = 'SELECT count(*) FROM people WHERE business_id=? AND created_at>=?'
+    outbound = ("SELECT count(*) FROM messages m JOIN people p ON p.id=m.person_id "
+                "WHERE p.business_id=? AND m.direction='out' AND lower(m.move)=? AND m.created_at>=?")
+    inbound = ("SELECT count(*) FROM messages m JOIN people p ON p.id=m.person_id "
+               "WHERE p.business_id=? AND m.direction='in' AND m.created_at>=?")
+    return {
+        'found': db.execute(people, (business_id, since)).fetchone()[0],
+        'letters': db.execute(outbound, (business_id, 'greet', since)).fetchone()[0],
+        'replies': db.execute(inbound, (business_id, since)).fetchone()[0],
+        'offers': db.execute(outbound, (business_id, 'offer', since)).fetchone()[0],
+        'paid': db.execute('SELECT count(*) FROM payments WHERE business_id=? AND test_mode=0 AND created_at>=?', (business_id, since)).fetchone()[0],
+        'unsubscribed': db.execute("SELECT count(*) FROM suppressions WHERE business_id=? AND lower(reason)='unsubscribe' AND created_at>=?", (business_id, since)).fetchone()[0],
+        'tokens': db.execute('SELECT COALESCE(SUM(COALESCE(tokens_in,0)+COALESCE(tokens_out,0)),0) FROM runs WHERE business_id=? AND started_at>=?', (business_id, since)).fetchone()[0],
+        'searches': db.execute("SELECT count(*) FROM runs WHERE business_id=? AND kind='search' AND started_at>=?", (business_id, since)).fetchone()[0],
+    }
+
+
+def _rate(count, previous):
+    if previous == 0:
+        return None
+    return f'{round(100 * count / previous, 1):.1f}'
+
+
+def metrics(settings, business_id, current=None):
+    """Activity in UTC windows. A percent is this step divided by the step above it."""
+    current = current or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ValueError('metrics current must be timezone-aware')
+    with connect(settings.db_path) as db:
+        columns = [{'label': label, **_since_counts(db, business_id, start.isoformat())} for label, start in _window_starts(current)]
+    rows, previous = [], None
+    for key, label in FUNNEL:
+        rows.append({'label': label, 'cells': [
+            {'count': column[key], 'rate': None if previous is None else _rate(column[key], column[previous])}
+            for column in columns]})
+        previous = key
+    rows.extend({'label': label, 'cells': [{'count': column[key], 'rate': None} for column in columns]} for key, label in USAGE)
+    return {'columns': [column['label'] for column in columns], 'rows': rows}
 
 
 def unsubscribe_token(settings, business_id, person_id):
