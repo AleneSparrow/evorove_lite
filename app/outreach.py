@@ -49,6 +49,22 @@ SENSITIVE_CLAIM = re.compile(
     r'limited time|only \d+ (?:spots?|slots?) left)\b)', re.IGNORECASE)
 URL_OR_CONTACT = re.compile(r'https?://|www\.|\S+@\S+\.\S+|\+?\d[\d ()\-]{8,}\d')
 
+# Words that mark a "name" as a company, department or role label rather than
+# a person -- the search agent sometimes hands over a business name or a team
+# label when it cannot find an actual decision maker.
+COMPANY_WORDS = frozenset((
+    'llc inc incorporated corp corporation co company group holdings solutions '
+    'services enterprises industries partners associates consulting team staff '
+    'department dept support sales marketing admin administration office ltd plc '
+    'clinic practice studio agency firm front desk reception receptionist manager '
+    'owner founder representative rep contact billing accounts operations ops '
+    'customer client help hr'
+).split())
+# Title case only: a real first/last name, not an all-caps label or a stray
+# token. The optional apostrophe/hyphen segment covers "O'Brien", "D'Angelo",
+# "Smith-Jones"; the leading part may be a single letter ("O") so it does too.
+NAME_WORD = re.compile(r"^[A-Z][a-z]*(?:['\-][A-Z]?[a-z]+)?$")
+
 QUOTE_START = re.compile(r'^(>|On .+wrote:\s*$|-{2,}\s*Original Message|From:\s|Sent from my )', re.IGNORECASE)
 AUTO_SUBJECT = re.compile(r'^(automatic reply|auto(matic)?[- ]?reply|out of (the )?office|auto:)', re.IGNORECASE)
 OPT_OUT_LINE = frozenset({'no', 'no thanks', 'no thank you', 'nope', 'stop', 'unsubscribe', 'remove',
@@ -119,11 +135,25 @@ def usable_pain(value):
     return pain.split('.')[0].strip().rstrip('.,;:') or None
 
 
+def usable_person_name(value):
+    """A name the letter may greet by first name: 1-3 title-case words, no line
+    break, none of them a company or department word. Anything else -- a
+    business name, a role label, a parsing accident -- greets "Hi," instead."""
+    text = (value or '').strip()
+    if not text or '\n' in text or '\r' in text:
+        return None
+    words = text.split()
+    if not 1 <= len(words) <= 3:
+        return None
+    if any(not NAME_WORD.match(word) or word.casefold() in COMPANY_WORDS for word in words):
+        return None
+    return words[0]
+
+
 def first_letter(business, person):
     """Pain first, then touch. Returns (subject, body) without the footer."""
-    name = (person['name'] or '').strip()
-    first_name = name.split(' ')[0] if name and '@' not in name else ''
-    greeting = 'Hi ' + first_name + ',' if first_name else 'Hi there,'
+    first_name = usable_person_name(person['name'])
+    greeting = 'Hi ' + first_name + ',' if first_name else 'Hi,'
     company = (business['name'] or 'our team').strip()
     pain = usable_pain(person['pain'])
     opening = ('Something I noticed: ' + pain + '.') if pain else (
@@ -167,7 +197,10 @@ def decide(analysis, sent_moves, business):
         return ASK_DISCOVERY
     if CONFIRM_NEED not in sent_moves:
         return CONFIRM_NEED
-    if analysis['ready'] and business['offer_text'] and business['payment_link']:
+    # One offer per person, ever. A second "I'm ready" does not get a second
+    # link -- whatever they actually asked is answered above (objection,
+    # missing discovery); anything left over is a plain, link-free check-in.
+    if OFFER not in sent_moves and analysis['ready'] and business['offer_text'] and business['payment_link']:
         return OFFER
     if PRESENT_VALUE not in sent_moves:
         return PRESENT_VALUE
@@ -201,7 +234,7 @@ def compose_reply(business, person, inbound, analysis, move, *, llm=None):
         answer = (llm or ask)(
             prompt('sales_reply.md'),
             json.dumps({'APPROVED_MOVE': move, 'ALLOWED_FACTS': facts,
-                        'OBSERVED_PAIN': person['pain'], 'PROSPECT_NAME': person['name'] or '',
+                        'OBSERVED_PAIN': person['pain'], 'PROSPECT_NAME': usable_person_name(person['name']) or '',
                         'SELLER': business['sender_name'] or business['name'],
                         'ANALYSIS': analysis, 'CUSTOMER_CONTENT': inbound[:TEXT_LIMIT]},
                        ensure_ascii=False),
@@ -435,10 +468,17 @@ def match_person(db, business_id, message):
     return dict(row) if row else None
 
 
-def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=None) -> int:
-    """Read the mailbox, store replies, answer each one once. Returns inbound count."""
+def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=None, now_utc=None) -> int:
+    """Read the mailbox, store replies, answer each one once. Returns inbound count.
+
+    Every poll also retries older inbound messages that never got an answer --
+    blocked earlier by quiet hours, the reply cap, or any other guard -- so a
+    reply waits for its own allowed window instead of being lost once the IMAP
+    cursor moves past it.
+    """
     settings = settings_or_default(settings)
     send, fetch = send or smtp_send, fetch or imap_fetch
+    moment = now_utc or datetime.now(timezone.utc)
     with connect(settings.db_path) as db:
         row = db.execute('SELECT * FROM businesses WHERE id=?', (business_id,)).fetchone()
     if not row:
@@ -453,17 +493,22 @@ def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=
     received = 0
     for message in messages:
         try:
-            if handle_reply(settings, business, message, own, send=send, llm=llm):
+            if handle_reply(settings, business, message, own, send=send, llm=llm, now_utc=moment):
                 received += 1
         except Exception:
             break  # retried on the next sweep; the cursor is not advanced past it
         cursor = message['uid']
     if cursor is not None and (cursor != last_uid or uidvalidity != last_uidvalidity):
         write_cursor(settings, business_id, cursor, uidvalidity)
+    answer_pending_replies(settings, business, send=send, llm=llm, now_utc=moment)
     return received
 
 
-def handle_reply(settings, business, message, own_address, *, send, llm=None):
+def handle_reply(settings, business, message, own_address, *, send, llm=None, now_utc=None):
+    """Store one inbound email once. Opt-out and hostility close the thread
+    right away (no SMTP needed, so no guard can delay them); everything else
+    is handed to attempt_reply, and left for answer_pending_replies to retry
+    if a guard blocks it this time."""
     business_id = business['id']
     sender = message['from']
     if not sender or sender == own_address or message['automatic']:
@@ -482,38 +527,88 @@ def handle_reply(settings, business, message, own_address, *, send, llm=None):
                    " VALUES (?,?,'in',?,?,?,?)",
                    (str(uuid4()), person['id'], message['subject'], text, message['message_id'], now()))
         db.execute('UPDATE people SET updated_at=? WHERE id=?', (now(), person['id']))
-        sent_moves = {row[0] for row in db.execute(
-            "SELECT move FROM messages WHERE person_id=? AND direction='out' AND move IS NOT NULL", (person['id'],))}
     if is_opt_out(text) or HOSTILE.search(text[:500]):
         return stop_contact(settings, business_id, person, 'reply_opt_out')
     if person['stage'] in {'done', 'lost'}:
         return True  # shown on the card, not answered
+    references = ' '.join(part for part in (message['references'], message['message_id']) if part)
+    attempt_reply(settings, business, person, in_reply_to=message['message_id'], references=references,
+                 subject=message['subject'], text=text, send=send, llm=llm, now_utc=now_utc)
+    return True
+
+
+def attempt_reply(settings, business, person, *, in_reply_to, references, subject, text, send, llm=None, now_utc=None):
+    """Decide and try to send one reply to one already-stored inbound message.
+    Returns True when it went out, False when a guard blocked it (left
+    exactly as it was for the next poll's answer_pending_replies to retry)."""
+    business_id = business['id']
+    with connect(settings.db_path) as db:
+        sent_moves = {row[0] for row in db.execute(
+            "SELECT move FROM messages WHERE person_id=? AND direction='out' AND move IS NOT NULL", (person['id'],))}
     analysis = dict(ANALYSIS_FIELDS)
     try:
         analysis = analysis_from((llm or ask)(
             prompt('sales_analysis.md'),
             json.dumps({'CUSTOMER_CONTENT': text, 'OBSERVED_PAIN': person['pain'],
-                        'THREAD_SUBJECT': message['subject']}, ensure_ascii=False),
+                        'THREAD_SUBJECT': subject}, ensure_ascii=False),
             schema=ANALYSIS_SCHEMA, purpose='sales_analysis'))
     except Exception:
         pass  # an unreadable analysis keeps discovery going; it never invents readiness
     if analysis['hostile']:
-        return stop_contact(settings, business_id, person, 'hostile_reply')
+        stop_contact(settings, business_id, person, 'hostile_reply')
+        return True  # the thread is closed; there is nothing left to retry
     move = decide(analysis, sent_moves, business)
-    allowed, reason = guards.can_send(business_id, person['email'], datetime.now(timezone.utc), settings=settings)
+    moment = now_utc or datetime.now(timezone.utc)
+    allowed, reason = guards.can_send(business_id, person['email'], moment, settings=settings, kind='reply')
     if not allowed:
         with connect(settings.db_path) as db:
             db.execute('INSERT INTO log(business_id,person_id,event,detail,created_at) VALUES (?,?,?,?,?)',
                        (business_id, person['id'], 'reply_blocked', reason, now()))
-        return True
-    subject = message['subject'].strip() or 'Your reply'
-    if not subject.casefold().startswith('re:'):
-        subject = 'Re: ' + subject
-    references = ' '.join(part for part in (message['references'], message['message_id']) if part)
-    deliver(settings, business, person, subject[:255],
+        return False
+    reply_subject = (subject or '').strip() or 'Your reply'
+    if not reply_subject.casefold().startswith('re:'):
+        reply_subject = 'Re: ' + reply_subject
+    deliver(settings, business, person, reply_subject[:255],
             compose_reply(business, person, text, analysis, move, llm=llm), move, send=send,
-            headers={'In-Reply-To': message['message_id'], 'References': references[-900:]})
+            headers={'In-Reply-To': in_reply_to, 'References': references[-900:]})
     return True
+
+
+def pending_replies(db, business_id):
+    """Inbound messages with no matching outbound reply yet, for people still
+    worth answering. An 'in' row counts as answered once some 'out' row's
+    in_reply_to names its smtp_message_id -- exactly how deliver() threads a
+    reply, so a message answered here is never picked up again."""
+    return [dict(row) for row in db.execute(
+        "SELECT m.* FROM messages m JOIN people p ON p.id=m.person_id "
+        "WHERE p.business_id=? AND m.direction='in' AND p.stage NOT IN ('done','lost') "
+        'AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.person_id=m.person_id '
+        "AND o.direction='out' AND o.in_reply_to=m.smtp_message_id) "
+        'ORDER BY m.created_at,m.id', (business_id,))]
+
+
+def answer_pending_replies(settings, business, *, send, llm=None, now_utc=None):
+    """Retry every inbound message that never got an answer. Runs on every
+    poll (see poll_replies), so a reply blocked once by quiet hours or the
+    reply cap goes out as soon as its own window allows -- it is never simply
+    dropped because the IMAP cursor already moved past it."""
+    business_id = business['id']
+    with connect(settings.db_path) as db:
+        pending = pending_replies(db, business_id)
+    answered = 0
+    for row in pending:
+        with connect(settings.db_path) as db:
+            person = db.execute('SELECT * FROM people WHERE id=?', (row['person_id'],)).fetchone()
+        if not person:
+            continue
+        person = dict(person)
+        if person['stage'] in {'done', 'lost'}:
+            continue  # changed since the query ran, e.g. stopped earlier this same poll
+        if attempt_reply(settings, business, person, in_reply_to=row['smtp_message_id'],
+                         references=row['smtp_message_id'], subject=row['subject'] or '',
+                         text=row['body'], send=send, llm=llm, now_utc=now_utc):
+            answered += 1
+    return answered
 
 
 def stop_contact(settings, business_id, person, reason):

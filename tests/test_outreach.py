@@ -1,4 +1,5 @@
 """Cycle 2 end to end on a fake SMTP, a fake IMAP and a stub LLM. No network."""
+from datetime import timedelta
 from email.message import EmailMessage
 from uuid import uuid4
 
@@ -6,7 +7,7 @@ import pytest
 
 from app import billing, guards, outreach
 from app.db import connect
-from test_guards import DAYTIME, EVENING, make_business, make_person, settings  # noqa: F401
+from test_guards import DAYTIME, EVENING, add_out_messages, make_business, make_person, settings  # noqa: F401
 
 
 class FakeSmtp:
@@ -127,6 +128,34 @@ def test_first_letter_carries_the_footer_and_one_click_headers(settings):
     assert smtp.targets[0]['password'] == 'smtp-secret'
 
 
+@pytest.mark.parametrize('name,first_name', [
+    ('Dana Reed', 'Dana'), ('Dana', 'Dana'), ("Mary O'Brien Smith", 'Mary'),
+    ('Smith-Jones', 'Smith-Jones'), ('  Dana   Reed  ', 'Dana'),
+])
+def test_usable_person_name_accepts_one_to_three_title_case_words(name, first_name):
+    assert outreach.usable_person_name(name) == first_name
+
+
+@pytest.mark.parametrize('name', [
+    None, '', '   ', 'Reed Dental Clinic LLC',  # 4 words, and a company word anyway
+    'Sales Team', 'Front Desk', 'ACME SOLUTIONS', 'dana reed',  # not title case
+    'Dana\nReed', 'Dana\r\nReed', 'dana@clinic.example', '123 Main',
+])
+def test_usable_person_name_rejects_anything_that_is_not_a_human_name(name):
+    assert outreach.usable_person_name(name) is None
+
+
+def test_first_letter_greets_plainly_when_the_name_is_not_usable(settings):
+    make_business(settings)
+    make_person(settings, name='Reed Dental Clinic LLC')
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    body, message = smtp.bodies[0], smtp.sent[0]
+    assert body.startswith('Hi,\n\n')
+    assert 'Reed Dental Clinic LLC' not in body
+    assert message['Subject'] == 'A note from Acme'
+
+
 def test_a_person_with_no_email_is_never_contacted(settings):
     make_business(settings)
     make_person(settings, email='')
@@ -213,6 +242,23 @@ def test_policy_precedence(settings):
     # Readiness without a configured offer never invents one.
     assert outreach.decide(dict(known, ready=True), {outreach.CONFIRM_NEED},
                            {'offer_text': '', 'payment_link': ''}) == outreach.PRESENT_VALUE
+
+
+def test_decide_never_sends_the_offer_twice(settings):
+    make_business(settings)
+    business = {'offer_text': 'Two boards.', 'payment_link': 'https://pay.example.com/acme'}
+    ready = dict(outreach.ANALYSIS_FIELDS, problem='calls go unanswered',
+                 desired_outcome='same-day callbacks', ready=True)
+    already_offered = {outreach.CONFIRM_NEED, outreach.PRESENT_VALUE, outreach.OFFER}
+    # Still ready, still no objection, offer already sent: never OFFER again.
+    assert outreach.decide(ready, already_offered, business) != outreach.OFFER
+    assert outreach.decide(ready, already_offered, business) == outreach.NURTURE
+    # A new objection after the offer is still answered, not ignored.
+    objecting = dict(ready, objection='too expensive', objection_cause='affordability')
+    assert outreach.decide(objecting, already_offered, business) == outreach.ANSWER_OBJECTION
+    # A new, unanswered question after the offer still gets a discovery question.
+    fresh_question = dict(outreach.ANALYSIS_FIELDS, ready=True)
+    assert outreach.decide(fresh_question, already_offered, business) == outreach.ASK_DISCOVERY
 
 
 def test_validator_rejects_what_the_model_may_not_say():
@@ -372,6 +418,54 @@ def test_the_offer_hands_over_the_owners_words_and_link(settings):
     assert people(settings)[0]['stage'] == 'offer_made'
 
 
+def test_a_second_ready_reply_never_repeats_the_offer_link(settings):
+    make_business(settings)
+    person = make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    with connect(settings.db_path) as db:
+        db.execute("INSERT INTO messages(id,person_id,direction,subject,body,move,created_at)"
+                   " VALUES (?,?,'out','s','b','confirm_need','2026-11-03T12:00:00+00:00')",
+                   (str(uuid4()), person['id']))
+    ready = {'problem': 'late callbacks', 'desired_outcome': 'same-day callbacks', 'ready': True}
+    llm = stub_llm(analysis=ready, body='Here is what I can put in front of you.')
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
+        [inbound('Send me the details.', uid=11)], uidvalidity=1), llm=llm)
+    assert messages(settings, person['id'])[-1]['move'] == outreach.OFFER
+
+    # They say "ready" again -- no second link, and the move is never OFFER again.
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
+        [inbound('Sounds great, I am ready to go.', uid=12)], uidvalidity=1), llm=llm)
+    stored = messages(settings, person['id'])
+    assert [row['move'] for row in stored if row['direction'] == 'out'].count(outreach.OFFER) == 1
+    assert 'pay.example.com' not in smtp.bodies[-1]
+    assert people(settings)[0]['stage'] == 'offer_made'
+
+
+def test_an_objection_after_the_offer_is_still_answered(settings):
+    make_business(settings)
+    person = make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    with connect(settings.db_path) as db:
+        db.execute("INSERT INTO messages(id,person_id,direction,subject,body,move,created_at)"
+                   " VALUES (?,?,'out','s','b','confirm_need','2026-11-03T12:00:00+00:00')",
+                   (str(uuid4()), person['id']))
+    ready = {'problem': 'late callbacks', 'desired_outcome': 'same-day callbacks', 'ready': True}
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
+        [inbound('Send me the details.', uid=11)], uidvalidity=1),
+        llm=stub_llm(analysis=ready, body='Here is what I can put in front of you.'))
+    assert messages(settings, person['id'])[-1]['move'] == outreach.OFFER
+
+    objecting = {'objection': 'too expensive', 'objection_cause': 'affordability'}
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
+        [inbound('That is more than I expected to pay.', uid=12)], uidvalidity=1),
+        llm=stub_llm(analysis=objecting))
+    stored = messages(settings, person['id'])
+    assert stored[-1]['move'] == outreach.ANSWER_OBJECTION
+    assert [row['move'] for row in stored].count(outreach.OFFER) == 1
+
+
 def test_a_model_that_invents_a_claim_is_replaced_by_the_safe_wording(settings):
     make_business(settings)
     make_person(settings)
@@ -410,15 +504,101 @@ def test_a_question_for_a_human_gets_the_servers_own_wording(settings):
 def test_a_reply_is_stored_even_when_a_guard_blocks_the_answer(settings):
     make_business(settings)
     person = make_person(settings, us_state='NY')
+    filler = make_person(settings, email='filler@clinic.example', stage='in_progress')
     smtp = FakeSmtp()
     outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
-    with connect(settings.db_path) as db:
-        db.execute('UPDATE businesses SET daily_cap=1 WHERE id=?', ('biz-1',))
+    # The reply cap is business-wide, not per person, and blocks an answer now
+    # instead of the business's greet daily_cap -- see test_guards.py for the
+    # cap split itself.
+    add_out_messages(settings, filler['id'], guards.REPLY_CAP, move='nurture')
     assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound('Tell me more.')]),
-                                 llm=stub_llm()) == 1
+                                 llm=stub_llm(), now_utc=DAYTIME) == 1
     assert len(smtp.sent) == 1
-    assert ('reply_blocked', 'daily_cap') in log_events(settings)
+    assert ('reply_blocked', 'reply_cap') in log_events(settings)
     assert [row['direction'] for row in messages(settings, person['id'])] == ['out', 'in']
+
+
+def test_a_reply_blocked_by_quiet_hours_is_retried_once_allowed(settings):
+    make_business(settings)
+    person = make_person(settings, us_state='NY')
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    reply = inbound('Tell me more.')
+    # Arrives during NY quiet hours: stored, but no reply is sent yet.
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([reply]),
+                                 llm=stub_llm(), now_utc=EVENING) == 1
+    assert len(smtp.sent) == 1
+    assert ('reply_blocked', 'quiet_hours') in log_events(settings)
+    assert [row['direction'] for row in messages(settings, person['id'])] == ['out', 'in']
+
+    # Next poll, no new mail, but NY's window is open now: the same inbound
+    # message gets its answer, threaded to the original, not lost.
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([]),
+                                 llm=stub_llm(), now_utc=DAYTIME) == 0
+    assert len(smtp.sent) == 2
+    stored = messages(settings, person['id'])
+    assert [row['direction'] for row in stored] == ['out', 'in', 'out']
+    assert stored[-1]['in_reply_to'] == reply['message_id']
+    assert smtp.sent[-1]['In-Reply-To'] == reply['message_id']
+
+
+def test_a_retried_reply_is_never_sent_twice(settings):
+    make_business(settings)
+    person = make_person(settings, us_state='NY')
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound('Tell me more.')]),
+                          llm=stub_llm(), now_utc=EVENING)
+    assert len(smtp.sent) == 1  # blocked by quiet hours
+
+    # Two more polls in the open window, both with no new mail: the dedup
+    # (an 'out' row already threads to this 'in' row) keeps it at one answer.
+    for _ in range(2):
+        outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([]),
+                              llm=stub_llm(), now_utc=DAYTIME)
+    assert len(smtp.sent) == 2
+    assert [row['direction'] for row in messages(settings, person['id'])] == ['out', 'in', 'out']
+
+
+def test_a_reply_blocked_by_the_reply_cap_is_retried_once_under_it(settings):
+    make_business(settings)
+    person = make_person(settings)
+    filler = make_person(settings, email='filler@clinic.example', stage='in_progress')
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    add_out_messages(settings, filler['id'], guards.REPLY_CAP, stamp=DAYTIME.isoformat(), move='nurture')
+    reply = inbound('Tell me more.')
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([reply]),
+                                 llm=stub_llm(), now_utc=DAYTIME) == 1
+    assert len(smtp.sent) == 1
+    assert ('reply_blocked', 'reply_cap') in log_events(settings)
+
+    # A day later (owner's UTC "today" in this fixture), the cap is fresh:
+    # yesterday's 60 filler replies no longer count, and the retry goes out.
+    next_day = DAYTIME + timedelta(days=1)
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([]),
+                                 llm=stub_llm(), now_utc=next_day) == 0
+    assert len(smtp.sent) == 2
+    assert messages(settings, person['id'])[-1]['in_reply_to'] == reply['message_id']
+
+
+def test_a_stopped_persons_older_pending_reply_is_not_retried(settings):
+    make_business(settings)
+    person = make_person(settings, us_state='NY')
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound('Tell me more.', uid=11)]),
+                          llm=stub_llm(), now_utc=EVENING)
+    assert len(smtp.sent) == 1  # blocked by quiet hours, still pending
+
+    # A later message from the same person opts out before the window opens.
+    outreach.poll_replies('biz-1', settings=settings, send=smtp,
+                          fetch=fake_imap([inbound('Unsubscribe me.', uid=12)]), llm=stub_llm(), now_utc=EVENING)
+    assert people(settings)[0]['stage'] == 'lost'
+
+    # The window opens: the earlier, still-unanswered message is not retried.
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([]), llm=stub_llm(), now_utc=DAYTIME)
+    assert len(smtp.sent) == 1
 
 
 def test_the_first_poll_only_records_where_the_inbox_is(settings):
