@@ -1,3 +1,4 @@
+import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
@@ -9,7 +10,7 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, billing, board, outreach
+from . import auth, billing, board, outreach, search
 from .scheduler import Scheduler
 from .db import ROOT, connect, migrate, now
 from .settings import load
@@ -21,12 +22,16 @@ def create_app(settings=None, *, scheduler_enabled=True):
         app.state.settings = settings or load()
         migrate(app.state.settings.db_path)
         app.state.scheduler = Scheduler(app.state.settings)
+        app.state.search_previews = {}
+        app.state.search_preview_tasks = set()
         if scheduler_enabled:
             app.state.scheduler.start()
         try:
             yield
         finally:
             await app.state.scheduler.stop()
+            if app.state.search_preview_tasks:
+                await asyncio.gather(*app.state.search_preview_tasks, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan)
     templates = Jinja2Templates(directory=str(ROOT / "app/templates"))
@@ -191,6 +196,51 @@ def create_app(settings=None, *, scheduler_enabled=True):
         if request.headers.get('hx-request') == 'true':
             return render(request, 'search_status.html', last=board.last_search(s, user['business_id']))
         return RedirectResponse('/app', status_code=303)
+
+    @app.get('/app/search-preview')
+    def search_preview(request: Request):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        return render(request, 'search_preview.html',
+                      preview=request.app.state.search_previews.get(user['business_id']))
+
+    @app.get('/app/search-preview/status')
+    def search_preview_status(request: Request):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        return render(request, 'search_preview_results.html',
+                      preview=request.app.state.search_previews.get(user['business_id']))
+
+    @app.post('/app/search-preview')
+    async def start_search_preview(request: Request):
+        await form(request)
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        bid = user['business_id']
+        business = board.business(s, bid)
+        if business['subscription_status'] not in {'active', 'on_trial'}:
+            raise HTTPException(403, 'An active subscription is required')
+        if not business['brief']:
+            raise HTTPException(400, 'Add a search brief in Settings first')
+        current = request.app.state.search_previews.get(bid)
+        if not current or current.get('status') != 'running':
+            request.app.state.search_previews[bid] = {'status': 'running', 'people': []}
+
+            async def execute_preview():
+                try:
+                    people = await asyncio.to_thread(search.run_search, bid, limit=20, dry_run=True)
+                    request.app.state.search_previews[bid] = {'status': 'ok', 'people': people}
+                except Exception as exc:
+                    request.app.state.search_previews[bid] = {
+                        'status': 'failed', 'people': [], 'error': type(exc).__name__}
+
+            task = asyncio.create_task(execute_preview())
+            request.app.state.search_preview_tasks.add(task)
+            task.add_done_callback(request.app.state.search_preview_tasks.discard)
+        if request.headers.get('hx-request') == 'true':
+            return render(request, 'search_preview_results.html',
+                          preview=request.app.state.search_previews.get(bid))
+        return RedirectResponse('/app/search-preview', status_code=303)
 
     @app.get('/app/settings')
     def settings_page(request: Request):
