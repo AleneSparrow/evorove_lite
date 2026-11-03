@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import ipaddress
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ from .db import connect, now
 
 HASHER = PasswordHasher()
 COOKIE = "evorove_session"
+LEGACY_PBKDF2_PREFIX = "pbkdf2_sha256"
 
 
 def client_ip(request):
@@ -49,6 +51,25 @@ def email_address(value):
 def password_rule(password):
     if not 12 <= len(password) <= 1024:
         raise HTTPException(400, "Password must contain 12–1024 characters")
+
+
+def verify_legacy_password(password, stored):
+    """Verify the one PBKDF2 format emitted by the retired application."""
+    try:
+        label, iterations_text, salt_hex, expected_hex = stored.split("$")
+        if label != LEGACY_PBKDF2_PREFIX:
+            return False
+        iterations = int(iterations_text)
+        if not 100_000 <= iterations <= 2_000_000:
+            return False
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(expected_hex)
+        if not 8 <= len(salt) <= 64 or len(expected) != hashlib.sha256().digest_size:
+            return False
+    except (AttributeError, TypeError, ValueError):
+        return False
+    candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(candidate, expected)
 
 
 def rate_limit(settings, ip, email, kind):
@@ -86,14 +107,25 @@ def login(settings, email, password, ip):
     rate_limit(settings, ip, email, "login")
     with connect(settings.db_path) as db:
         user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    try:
-        # Equal work for an unknown email; never reveal whether an account exists.
-        stored = user["password_hash"] if user else HASHER.hash(secrets.token_urlsafe(24))
-        valid = HASHER.verify(stored, password)
-    except (VerificationError, InvalidHashError):
-        valid = False
+    # Equal Argon2 work for an unknown email; never reveal whether an account exists.
+    stored = user["password_hash"] if user else HASHER.hash(secrets.token_urlsafe(24))
+    legacy = stored.startswith(LEGACY_PBKDF2_PREFIX + "$")
+    if legacy:
+        valid = verify_legacy_password(password, stored)
+    else:
+        try:
+            valid = HASHER.verify(stored, password)
+        except (VerificationError, InvalidHashError):
+            valid = False
     if not user or not valid:
         raise HTTPException(401, "Invalid email or password")
+    if legacy:
+        upgraded = HASHER.hash(password)
+        with connect(settings.db_path) as db:
+            db.execute(
+                "UPDATE users SET password_hash=? WHERE id=? AND password_hash=?",
+                (upgraded, user["id"], stored),
+            )
     return user["id"]
 
 

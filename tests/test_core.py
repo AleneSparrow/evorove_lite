@@ -83,6 +83,37 @@ def test_signup_login_logout(client, settings):
     assert 'SameSite=lax' in response.headers['set-cookie']
 
 
+def test_legacy_pbkdf2_login_upgrades_hash(client, settings):
+    signup(client)
+    password = 'long password 123'
+    salt = bytes.fromhex('00112233445566778899aabbccddeeff')
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 390_000).hex()
+    legacy = f'pbkdf2_sha256$390000${salt.hex()}${digest}'
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE users SET password_hash=? WHERE email='owner@example.com'", (legacy,))
+
+    assert form(client, '/app', '/logout').status_code == 303
+    assert form(client, '/login', email='owner@example.com', password=password).status_code == 303
+    with connect(settings.db_path) as db:
+        upgraded = db.execute("SELECT password_hash FROM users WHERE email='owner@example.com'").fetchone()[0]
+    assert upgraded.startswith('$argon2id$')
+    assert upgraded != legacy
+
+
+def test_legacy_pbkdf2_rejects_wrong_password_without_rehash(client, settings):
+    signup(client)
+    salt = bytes.fromhex('00112233445566778899aabbccddeeff')
+    digest = hashlib.pbkdf2_hmac('sha256', b'long password 123', salt, 390_000).hex()
+    legacy = f'pbkdf2_sha256$390000${salt.hex()}${digest}'
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE users SET password_hash=? WHERE email='owner@example.com'", (legacy,))
+
+    assert form(client, '/app', '/logout').status_code == 303
+    assert form(client, '/login', email='owner@example.com', password='wrong password 456').status_code == 401
+    with connect(settings.db_path) as db:
+        assert db.execute("SELECT password_hash FROM users WHERE email='owner@example.com'").fetchone()[0] == legacy
+
+
 def test_password_validation_csrf_and_duplicates(client, settings):
     assert form(client, '/signup', email='a@example.com', password='short', business_name='A').status_code == 400
     assert client.post('/signup', data={'email': 'x@example.com'}).status_code == 403
