@@ -332,7 +332,9 @@ def test_client_zero_seeds_the_owner_brief(db, monkeypatch):
     monkeypatch.setenv("CLIENT_ZERO_BUSINESS_ID", bid)
     assert search.run_search(bid) == []
     offer_user = messages.calls[0]["messages"][0]["content"]
-    assert "SOURCE NAME: service.txt" in offer_user and "7-day free trial" in offer_user
+    assert "SOURCE NAME: service.txt" in offer_user
+    assert "Starter is $199/month" in offer_user and "Pro is $499/month" in offer_user
+    assert "7-day free trial" not in offer_user
     assert search_run(db)["status"] == "ok"
 
 
