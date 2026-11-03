@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+jinja2
+anthropic
+httpx
+selectolax
+itsdangerous
+argon2-cffi
+pytest

@@ -1,0 +1,5 @@
+{% extends 'base.html' %}{% block content %}
+<h1>{{ business.name }}</h1><p>Subscription: {{ business.subscription_status }}</p>
+{% for plan in ['starter','pro'] %}<form method="post" action="/billing/checkout/{{ plan }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Choose {{ plan|capitalize }}</button></form>{% endfor %}
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Log out</button></form>
+{% endblock %}

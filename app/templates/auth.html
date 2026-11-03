@@ -1,0 +1,11 @@
+{% extends 'base.html' %}{% block content %}
+<h1>{{ {'signup':'Create your account','login':'Welcome back','forgot-password':'Reset your password','reset':'Choose a new password'}[mode] }}</h1>
+<form method="post" action="/{{ mode }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% if mode == 'signup' %}<label>Business name<input name="business_name" required maxlength="200" autocomplete="organization"></label>{% endif %}
+{% if mode != 'reset' %}<label>Email<input type="email" name="email" required maxlength="254" autocomplete="email"></label>{% endif %}
+{% if mode != 'forgot-password' %}<label>Password<input type="password" name="password" required minlength="12" maxlength="1024" autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}"></label><p>At least 12 characters.</p>{% endif %}
+{% if mode == 'reset' %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
+<button type="submit">Continue</button></form>
+<nav><a href="/login">Log in</a> · <a href="/signup">Create account</a> · <a href="/forgot-password">Forgot password?</a></nav>
+{% endblock %}
