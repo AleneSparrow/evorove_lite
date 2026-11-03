@@ -78,6 +78,32 @@ def test_board_person_timeline_and_tenant_isolation(client, settings):
     assert client.get('/app?person=' + other_pid).status_code == 404
 
 
+def test_owner_can_confirm_manual_payment(client, settings, monkeypatch):
+    signup(client)
+    bid = business(settings)['id']
+    pid = add_person(settings, bid, stage='offer_made')
+    detail = client.get('/app/people/' + pid)
+    assert 'Record payment' in detail.text
+    assert 'I confirm this payment was received.' in detail.text
+    assert form(client, '/app/people/' + pid, '/app/people/' + pid + '/payment').status_code == 400
+
+    calls = []
+    def record_payment(business_id, person_id, source):
+        calls.append((business_id, person_id, source))
+        with connect(settings.db_path) as db:
+            db.execute("UPDATE people SET stage='done',updated_at=? WHERE id=? AND business_id=?",
+                       (now(), person_id, business_id))
+    monkeypatch.setattr('app.main.outreach.record_payment', record_payment)
+    response = form(client, '/app/people/' + pid, '/app/people/' + pid + '/payment', confirm='yes')
+    assert response.status_code == 200
+    assert 'Record payment' not in response.text
+    assert calls == [(bid, pid, 'manual')]
+    with connect(settings.db_path) as db:
+        assert db.execute('SELECT stage FROM people WHERE id=?', (pid,)).fetchone()[0] == 'done'
+        assert db.execute("SELECT count(*) FROM payments WHERE raw_event_id=?",
+                          (f'manual:{bid}:{pid}',)).fetchone()[0] == 1
+
+
 def test_settings_validation_and_no_password_echo(client, settings):
     signup(client)
     fields = {'postal_address': '12 Main Street, Austin TX', 'daily_cap': '20', 'quiet_start': '20:00', 'quiet_end': '08:00', 'outreach_paused': 'on'}

@@ -83,6 +83,9 @@ def send_first_letters(business_id: str) -> int: ...          # cold people with
 def poll_replies(business_id: str) -> int: ...                # IMAP -> messages(in) -> next move -> reply
 def record_payment(business_id: str, person_id: str, source: str) -> None: ...  # -> stage 'done'
 
+# billing.py
+def payment_link_for(business, person_id: str) -> str: ...     # checkout URL carrying business_id + person_id in custom_data
+
 # guards.py
 def can_send(business_id: str, email: str, now_utc) -> tuple[bool, str]: ...    # reason when False
 def footer(business_id: str, person_id: str) -> str: ...                        # unsubscribe link + postal address

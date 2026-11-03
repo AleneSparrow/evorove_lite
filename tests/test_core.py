@@ -185,6 +185,77 @@ def test_checkout(client, settings, monkeypatch):
     assert form(client, '/app', '/billing/checkout/fake').status_code == 400
 
 
+def test_payment_link_for_scopes_checkout_to_person():
+    url = billing.payment_link_for(
+        {'id': 'business-1', 'payment_link': 'https://store.example/checkout/buy?discount=SAVE'},
+        'person-1',
+    )
+    query = parse_qs(urlparse(url).query)
+    assert query == {
+        'discount': ['SAVE'],
+        'checkout[custom][business_id]': ['business-1'],
+        'checkout[custom][person_id]': ['person-1'],
+    }
+
+
+@pytest.mark.parametrize('event_name,data_type,data_id', [
+    ('subscription_payment_success', 'subscription-invoices', 'invoice-person-1'),
+    ('order_created', 'orders', 'order-person-1'),
+])
+def test_payment_event_records_done_in_same_transaction(client, settings, monkeypatch,
+                                                        event_name, data_type, data_id):
+    signup(client)
+    bid = business(settings)['id']
+    with connect(settings.db_path) as db:
+        pid = 'person-payment-1'
+        db.execute('INSERT INTO people(id,business_id,email,pain,evidence_quote,source_url,stage,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                   (pid, bid, 'buyer@example.com', 'Need', 'Quoted need',
+                    'https://example.com/source', 'offer_made', now(), now()))
+    if event_name.startswith('subscription_'):
+        assert deliver(client, settings, event(bid)).status_code == 200
+
+    calls = []
+    def record_payment(business_id, person_id, source, *, db=None):
+        assert db is not None
+        assert db.execute('SELECT id FROM businesses WHERE id=?', (business_id,)).fetchone()
+        calls.append((business_id, person_id, source))
+        db.execute("UPDATE people SET stage='done',updated_at=? WHERE id=? AND business_id=?",
+                   (now(), person_id, business_id))
+    monkeypatch.setattr(billing.outreach, 'record_payment', record_payment)
+    attributes = {'total': 4900, 'updated_at': '2026-11-03T11:00:00Z', 'test_mode': False}
+    if data_type == 'subscription-invoices':
+        attributes['subscription_id'] = 'sub-1'
+    payment_event = {
+        'meta': {'event_name': event_name, 'event_id': 'event-' + data_id,
+                 'custom_data': {'business_id': bid, 'person_id': pid}, 'test_mode': False},
+        'data': {'type': data_type, 'id': data_id, 'attributes': attributes},
+    }
+    assert deliver(client, settings, payment_event).status_code == 200
+    assert deliver(client, settings, payment_event).status_code == 200
+    assert calls == [(bid, pid, 'lemonsqueezy')]
+    with connect(settings.db_path) as db:
+        payment = db.execute('SELECT person_id,source FROM payments').fetchone()
+        assert tuple(payment) == (pid, 'lemonsqueezy')
+        assert db.execute('SELECT stage FROM people WHERE id=?', (pid,)).fetchone()[0] == 'done'
+
+
+def test_test_payment_event_obeys_email_allowlist(client, settings, monkeypatch):
+    signup(client, 'stranger@example.com')
+    bid = business(settings)['id']
+    called = []
+    monkeypatch.setattr(billing.outreach, 'record_payment', lambda *args, **kwargs: called.append(args))
+    payment_event = {
+        'meta': {'event_name': 'order_created', 'event_id': 'test-order-event',
+                 'custom_data': {'business_id': bid, 'person_id': 'unknown'}, 'test_mode': True},
+        'data': {'type': 'orders', 'id': 'test-order', 'attributes': {
+            'total': 100, 'created_at': '2026-11-03T11:00:00Z', 'test_mode': True}},
+    }
+    assert deliver(client, settings, payment_event).status_code == 200
+    assert called == []
+    with connect(settings.db_path) as db:
+        assert db.execute('SELECT count(*) FROM payments').fetchone()[0] == 0
+
+
 def test_staff_cannot_access_owner_pages(client, settings):
     signup(client)
     with connect(settings.db_path) as db:

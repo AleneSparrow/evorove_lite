@@ -9,9 +9,9 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, billing, board
+from . import auth, billing, board, outreach
 from .scheduler import Scheduler
-from .db import ROOT, connect, migrate
+from .db import ROOT, connect, migrate, now
 from .settings import load
 
 
@@ -144,6 +144,25 @@ def create_app(settings=None, *, scheduler_enabled=True):
     def person_detail(request: Request, person_id: str):
         s = request.app.state.settings
         user = auth.current_user(s, request)
+        return render(request, 'person.html', person=board.person(s, user['business_id'], person_id))
+
+    @app.post('/app/people/{person_id}/payment')
+    async def record_manual_payment(request: Request, person_id: str):
+        fields = await form(request)
+        if fields.get('confirm') != 'yes':
+            raise HTTPException(400, 'Confirm that payment was received')
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        person = board.person(s, user['business_id'], person_id)
+        if person['stage'] != 'done':
+            try:
+                await run_in_threadpool(outreach.record_payment, user['business_id'], person_id, 'manual')
+            except ValueError:
+                raise HTTPException(404, 'Person not found') from None
+        with connect(s.db_path) as db:
+            db.execute("INSERT OR IGNORE INTO payments(id,business_id,person_id,source,event_name,test_mode,raw_event_id,created_at) VALUES (?,?,?,'manual','manual_payment',0,?,?)",
+                       (str(secrets.token_urlsafe(18)), user['business_id'], person_id,
+                        f"manual:{user['business_id']}:{person_id}", now()))
         return render(request, 'person.html', person=board.person(s, user['business_id'], person_id))
 
     @app.get('/app/columns')
