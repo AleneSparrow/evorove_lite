@@ -17,8 +17,9 @@ CLIENT_ZERO_BRIEF = (
     "Evorove finds likely buyers on the open web and carries the sales conversation through closing.\n"
     "It is for US B2B businesses with high-value deals that want to replace or avoid a sales team.\n"
     "Evorove checks public fit, keeps a grounded reason, and shows the work on a CRM board.\n"
-    "It offers a 7-day free trial with no demo required, then a $199/month subscription.\n"
-    "The goal of the first week is to show results such as replies and bookings."
+    "Starter is $199/month: a sales agent for the customer's own contacts.\n"
+    "Pro is $499/month: Starter, plus a search for leads in the United States.\n"
+    "There is no free trial."
 )
 _STATE_LINES = """
 AL Alabama / AK Alaska / AZ Arizona / AR Arkansas / CA California / CO Colorado / CT Connecticut
