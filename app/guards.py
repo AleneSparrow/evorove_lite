@@ -5,7 +5,7 @@ gates, suppression, quiet hours, daily cap), src/api/routes/unsubscribe.py (one
 click, confirmation page first) and src/domain/us_postal_timezones.py (the US
 zone table, rekeyed from ZIP prefixes to the us_state this schema stores).
 """
-from datetime import timedelta
+from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from .board import unsubscribe_token
@@ -47,6 +47,13 @@ _STATE_CODES = {entry.rsplit(' ', 1)[0].upper(): entry.rsplit(' ', 1)[1] for ent
 # address stops receiving until the owner looks at it.
 FAILURE_LIMIT = 3
 
+# The owner's configured daily_cap (default 20) governs first letters only.
+# Replies (every move except 'greet' -- discovery, objection handling, the
+# offer, nurture, a close) are a separate conversation, not new outreach, so
+# they get their own fixed safety ceiling instead of competing with it.
+REPLY_CAP = 60
+DEFAULT_OWNER_ZONE = 'Asia/Ho_Chi_Minh'
+
 
 def recipient_zone(us_state):
     """IANA zone for the recipient's US state; DEFAULT_ZONE when unplaceable."""
@@ -62,12 +69,24 @@ def quiet_now(business, now_utc, zone):
     return start <= local < end if start < end else local >= start or local < end
 
 
-def can_send(business_id, email, now_utc, *, settings=None):
+def _owner_day_start(settings, now_utc):
+    """UTC instant of local midnight in the owner's own timezone (TIMEZONE_OWNER,
+    default Asia/Ho_Chi_Minh) -- both caps below count against this "today",
+    not a UTC calendar day that may already be tomorrow or still yesterday for
+    whichever owner is actually running the business."""
+    zone = settings.get('TIMEZONE_OWNER', DEFAULT_OWNER_ZONE)
+    local_midnight = now_utc.astimezone(ZoneInfo(zone)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(timezone.utc).isoformat()
+
+
+def can_send(business_id, email, now_utc, *, settings=None, kind='greet'):
     """(True, '') when this address may be emailed right now, else (False, reason).
 
     The order is the order of the old service's gates: configuration first, then
     the recipient's own rights, then reputation. The recipient's quiet hours come
-    from their us_state, never from the owner's clock.
+    from their us_state, never from the owner's clock. `kind` is 'greet' for a
+    first letter or 'reply' for anything answering an inbound message -- they
+    are counted against two independent caps (see REPLY_CAP above).
     """
     from .settings import load
     settings = settings or load()
@@ -92,12 +111,19 @@ def can_send(business_id, email, now_utc, *, settings=None):
                             (business_id, address)).fetchone()
         if quiet_now(business, now_utc, recipient_zone(person['us_state'] if person else None)):
             return False, 'quiet_hours'
-        day = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        sent = db.execute("SELECT count(*) FROM messages m JOIN people p ON p.id=m.person_id "
-                          "WHERE p.business_id=? AND m.direction='out' AND m.created_at>=?",
-                          (business_id, day)).fetchone()[0]
-        if sent >= (business['daily_cap'] or 20):
-            return False, 'daily_cap'
+        day = _owner_day_start(settings, now_utc)
+        if kind == 'greet':
+            sent = db.execute("SELECT count(*) FROM messages m JOIN people p ON p.id=m.person_id "
+                              "WHERE p.business_id=? AND m.direction='out' AND m.move='greet' AND m.created_at>=?",
+                              (business_id, day)).fetchone()[0]
+            if sent >= (business['daily_cap'] or 20):
+                return False, 'daily_cap'
+        else:
+            sent = db.execute("SELECT count(*) FROM messages m JOIN people p ON p.id=m.person_id "
+                              "WHERE p.business_id=? AND m.direction='out' AND (m.move IS NULL OR m.move!='greet') "
+                              'AND m.created_at>=?', (business_id, day)).fetchone()[0]
+            if sent >= REPLY_CAP:
+                return False, 'reply_cap'
         since = (now_utc - timedelta(days=30)).isoformat()
         failures = db.execute("SELECT count(*) FROM log WHERE business_id=? AND event='send_failed' "
                               'AND detail=? AND created_at>=?', (business_id, address, since)).fetchone()[0]

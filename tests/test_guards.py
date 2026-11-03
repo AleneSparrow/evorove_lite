@@ -16,8 +16,13 @@ EVENING = datetime(2026, 11, 4, 2, 0, tzinfo=timezone.utc)
 
 @pytest.fixture
 def settings(tmp_path):
+    # Pinned to UTC so DAYTIME's own UTC midnight is the cap boundary and
+    # every fixture that stamps a message with the real wall clock lands
+    # after it, exactly as before guards.py started reading TIMEZONE_OWNER.
+    # Dedicated tests below cover the owner-timezone boundary itself with
+    # their own Settings and fully explicit timestamps.
     settings = Settings({'SECRET_KEY': 'test-only-' * 6, 'DB_PATH': str(tmp_path / 'test.sqlite3'),
-                         'APP_BASE_URL': 'https://testserver'})
+                         'APP_BASE_URL': 'https://testserver', 'TIMEZONE_OWNER': 'UTC'})
     migrate(settings.db_path)
     return settings
 
@@ -53,12 +58,12 @@ def make_person(settings, business_id='biz-1', **over):
     return fields
 
 
-def add_out_messages(settings, person_id, count, stamp=None):
+def add_out_messages(settings, person_id, count, stamp=None, move='greet'):
     with connect(settings.db_path) as db:
         for index in range(count):
             db.execute("INSERT INTO messages(id,person_id,direction,subject,body,move,created_at)"
-                       " VALUES (?,?,'out','s','b','greet',?)",
-                       (str(uuid4()), person_id, stamp or now()))
+                       ' VALUES (?,?,\'out\',\'s\',\'b\',?,?)',
+                       (str(uuid4()), person_id, move, stamp or now()))
 
 
 def test_recipient_zone_table():
@@ -145,6 +150,63 @@ def test_yesterdays_letters_do_not_count_against_the_cap(settings):
     person = make_person(settings)
     add_out_messages(settings, person['id'], 25, stamp=(DAYTIME - timedelta(days=1)).isoformat())
     assert guards.can_send('biz-1', 'dana@clinic.example', DAYTIME, settings=settings) == (True, '')
+
+
+def test_daily_cap_counts_only_greet_moves(settings):
+    make_business(settings, daily_cap=1)
+    person = make_person(settings)
+    other = make_person(settings, email='other@clinic.example')
+    # 25 replies to the first person never touch the 20-greet cap.
+    add_out_messages(settings, person['id'], 25, move='nurture')
+    assert guards.can_send('biz-1', 'other@clinic.example', DAYTIME, settings=settings) == (True, '')
+    assert guards.can_send('biz-1', 'other@clinic.example', DAYTIME, settings=settings, kind='greet') == (True, '')
+    add_out_messages(settings, other['id'], 1, move='greet')
+    assert guards.can_send('biz-1', 'other@clinic.example', DAYTIME, settings=settings)[1] == 'daily_cap'
+
+
+def test_reply_cap_ignores_greet_moves_and_blocks_at_sixty(settings):
+    make_business(settings)
+    person = make_person(settings)
+    # 19 greets (under the 20 business cap) never count against the reply cap.
+    add_out_messages(settings, person['id'], 19, move='greet')
+    assert guards.can_send('biz-1', 'dana@clinic.example', DAYTIME, settings=settings, kind='reply') == (True, '')
+    add_out_messages(settings, person['id'], guards.REPLY_CAP - 1, move='nurture')
+    assert guards.can_send('biz-1', 'dana@clinic.example', DAYTIME, settings=settings, kind='reply') == (True, '')
+    add_out_messages(settings, person['id'], 1, move='ask_discovery')
+    assert guards.can_send('biz-1', 'dana@clinic.example', DAYTIME, settings=settings, kind='reply') == (False, 'reply_cap')
+    # The business's own daily_cap (20) is unaffected: this is a reply-only ceiling.
+    assert guards.can_send('biz-1', 'dana@clinic.example', DAYTIME, settings=settings, kind='greet') == (True, '')
+
+
+def test_reply_cap_also_counts_a_move_of_null(settings):
+    # offer/nurture/etc. always set move, but the column allows NULL and a
+    # null move is a reply (not a greet) exactly like any other non-greet move.
+    make_business(settings)
+    person = make_person(settings)
+    with connect(settings.db_path) as db:
+        for _ in range(guards.REPLY_CAP):
+            db.execute("INSERT INTO messages(id,person_id,direction,subject,body,created_at) VALUES (?,?,'out','s','b',?)",
+                       (str(uuid4()), person['id'], now()))
+    assert guards.can_send('biz-1', 'dana@clinic.example', DAYTIME, settings=settings, kind='reply') == (False, 'reply_cap')
+
+
+def test_daily_cap_boundary_follows_owner_timezone_not_utc_midnight(tmp_path):
+    # 2026-11-04T05:00Z is already 2026-11-04 in UTC, but it is still
+    # 2026-11-03 evening in Los Angeles (UTC-8 in November): the owner's
+    # "today" boundary is 2026-11-03T08:00Z, not a UTC midnight.
+    la_settings = Settings({'SECRET_KEY': 'test-only-' * 6, 'DB_PATH': str(tmp_path / 'la.sqlite3'),
+                            'APP_BASE_URL': 'https://testserver', 'TIMEZONE_OWNER': 'America/Los_Angeles'})
+    migrate(la_settings.db_path)
+    make_business(la_settings, daily_cap=1, quiet_start='00:00', quiet_end='00:00')
+    person = make_person(la_settings)
+    other = make_person(la_settings, email='other@clinic.example')
+    moment = datetime(2026, 11, 4, 5, 0, tzinfo=timezone.utc)
+    add_out_messages(la_settings, person['id'], 1, stamp='2026-11-03T07:00:00+00:00', move='greet')
+    # Before the LA boundary (08:00Z): does not count as today's greet yet.
+    assert guards.can_send('biz-1', 'other@clinic.example', moment, settings=la_settings) == (True, '')
+    add_out_messages(la_settings, person['id'], 1, stamp='2026-11-03T09:00:00+00:00', move='greet')
+    # After the LA boundary: this one does, and the cap of 1 is now reached.
+    assert guards.can_send('biz-1', 'other@clinic.example', moment, settings=la_settings)[1] == 'daily_cap'
 
 
 def test_repeated_delivery_failures_stop_one_address(settings):
