@@ -9,17 +9,24 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, billing
+from . import auth, billing, board
+from .scheduler import Scheduler
 from .db import ROOT, connect, migrate
 from .settings import load
 
 
-def create_app(settings=None):
+def create_app(settings=None, *, scheduler_enabled=True):
     @asynccontextmanager
     async def lifespan(app):
         app.state.settings = settings or load()
         migrate(app.state.settings.db_path)
-        yield
+        app.state.scheduler = Scheduler(app.state.settings)
+        if scheduler_enabled:
+            app.state.scheduler.start()
+        try:
+            yield
+        finally:
+            await app.state.scheduler.stop()
 
     app = FastAPI(lifespan=lifespan)
     templates = Jinja2Templates(directory=str(ROOT / "app/templates"))
@@ -68,8 +75,8 @@ def create_app(settings=None):
         return {"status": "ok"}
 
     @app.get("/")
-    def home():
-        return RedirectResponse("/login", status_code=303)
+    def home(request: Request):
+        return render(request, "landing.html")
 
     @app.get("/signup")
     @app.get("/login")
@@ -82,7 +89,7 @@ def create_app(settings=None):
     async def signup(request: Request):
         fields = await form(request)
         s = request.app.state.settings
-        await run_in_threadpool(auth.rate_limit, s, request.client.host, fields.get("email", "").lower(), "signup")
+        await run_in_threadpool(auth.rate_limit, s, auth.client_ip(request), fields.get("email", "").lower(), "signup")
         user_id = await run_in_threadpool(auth.signup, s, fields.get("email", ""), fields.get("password", ""), fields.get("business_name", ""))
         response = RedirectResponse("/app", status_code=303)
         auth.start_session(s, user_id, response)
@@ -95,7 +102,7 @@ def create_app(settings=None):
         password = fields.get("password", "")
         if len(password) > 1024:
             raise HTTPException(400, "Password is too long")
-        user_id = await run_in_threadpool(auth.login, s, fields.get("email", ""), password, request.client.host)
+        user_id = await run_in_threadpool(auth.login, s, fields.get("email", ""), password, auth.client_ip(request))
         response = RedirectResponse("/app", status_code=303)
         auth.start_session(s, user_id, response)
         return response
@@ -113,14 +120,14 @@ def create_app(settings=None):
     @app.post("/forgot-password")
     async def forgot(request: Request):
         fields = await form(request)
-        await run_in_threadpool(auth.request_reset, request.app.state.settings, fields.get("email", ""), request.client.host)
+        await run_in_threadpool(auth.request_reset, request.app.state.settings, fields.get("email", ""), auth.client_ip(request))
         return render(request, "notice.html", message="If an account exists, a reset email has been sent.")
 
     @app.post("/reset")
     async def reset(request: Request):
         fields = await form(request)
         s = request.app.state.settings
-        auth.rate_limit(s, request.client.host, "reset-token", "reset-token")
+        auth.rate_limit(s, auth.client_ip(request), auth.digest(fields.get("token", "")), "reset-token")
         await run_in_threadpool(auth.reset_password, s, fields.get("token", ""), fields.get("password", ""))
         return RedirectResponse("/login", status_code=303)
 
@@ -128,9 +135,76 @@ def create_app(settings=None):
     def account(request: Request):
         s = request.app.state.settings
         user = auth.current_user(s, request)
-        with connect(s.db_path) as db:
-            business = dict(db.execute("SELECT * FROM businesses WHERE id=?", (user["business_id"],)).fetchone())
-        return render(request, "account.html", business=business)
+        bid = user['business_id']
+        selected = request.query_params.get('person')
+        return render(request, 'board.html', business=board.business(s, bid), columns=board.columns(s, bid),
+                      last=board.last_search(s, bid), person=board.person(s, bid, selected) if selected else None)
+
+    @app.get('/app/people/{person_id}')
+    def person_detail(request: Request, person_id: str):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        return render(request, 'person.html', person=board.person(s, user['business_id'], person_id))
+
+    @app.get('/app/columns')
+    def board_columns(request: Request):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        return render(request, 'columns.html', columns=board.columns(s, user['business_id']))
+
+    @app.get('/app/search-status')
+    def search_status(request: Request):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        return render(request, 'search_status.html', last=board.last_search(s, user['business_id']))
+
+    @app.post('/app/find-people')
+    async def find_people(request: Request):
+        await form(request)
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        business = board.business(s, user['business_id'])
+        if business['subscription_status'] not in {'active', 'on_trial'}:
+            raise HTTPException(403, 'An active subscription is required')
+        if not business['brief']:
+            raise HTTPException(400, 'Add a search brief in Settings first')
+        request.app.state.scheduler.dispatch(user['business_id'], 'search')
+        if request.headers.get('hx-request') == 'true':
+            return render(request, 'search_status.html', last=board.last_search(s, user['business_id']))
+        return RedirectResponse('/app', status_code=303)
+
+    @app.get('/app/settings')
+    def settings_page(request: Request):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        return render(request, 'settings.html', business=board.business(s, user['business_id']))
+
+    @app.post('/app/settings')
+    async def update_settings(request: Request):
+        fields = await form(request)
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        await run_in_threadpool(board.save_settings, s, user['business_id'], fields)
+        return RedirectResponse('/app/settings?saved=1', status_code=303)
+
+    @app.get('/faq')
+    @app.get('/terms')
+    @app.get('/privacy')
+    @app.get('/dpa')
+    @app.get('/subprocessors')
+    def public_page(request: Request):
+        return render(request, request.url.path.strip('/') + '.html')
+
+    @app.get('/unsubscribe/{token}')
+    def unsubscribe_page(request: Request, token: str):
+        email = board.unsubscribe(request.app.state.settings, token)
+        return render(request, 'unsubscribe.html', email=email, token=token, done=False)
+
+    @app.post('/unsubscribe/{token}')
+    async def unsubscribe(request: Request, token: str):
+        # The signed bearer token authorizes RFC 8058 one-click POST without a session.
+        email = board.unsubscribe(request.app.state.settings, token, apply=True)
+        return render(request, 'unsubscribe.html', email=email, token=token, done=True)
 
     @app.post("/billing/checkout/{plan}")
     async def checkout(request: Request, plan: str):

@@ -1,7 +1,10 @@
 import sqlite3
+from contextvars import ContextVar
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+current_run_id = ContextVar("current_run_id", default=None)
 
 ROOT = Path(__file__).resolve().parent.parent
 

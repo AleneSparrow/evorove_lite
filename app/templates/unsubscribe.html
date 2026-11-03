@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<div class="narrow"><h1>{{ 'You are unsubscribed' if done else 'Unsubscribe' }}</h1><p>{% if done %}We will not email {{ email }} again.{% else %}Stop emails to {{ email }}?{% endif %}</p>{% if not done %}<form method="post" action="/unsubscribe/{{ token }}"><button>Unsubscribe</button></form>{% endif %}</div>{% endblock %}

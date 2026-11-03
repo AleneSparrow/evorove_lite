@@ -1,0 +1,1 @@
+<div id="search-status" role="status" hx-get="/app/search-status" hx-trigger="every 5s" hx-swap="outerHTML">{% if last %}<span class="eyebrow">Last search · {{ last.status }}</span><span>Found {{ last.found }} · {{ last.started_at }}</span>{% if last.error %}<span>Job failed: {{ last.error }}</span>{% endif %}{% else %}<span>No search has run yet.</span>{% endif %}</div>

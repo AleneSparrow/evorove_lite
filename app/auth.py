@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import os
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,6 +22,17 @@ from .db import connect, now
 
 HASHER = PasswordHasher()
 COOKIE = "evorove_session"
+
+
+def client_ip(request):
+    peer = request.client.host if request.client else "unknown"
+    if peer in {"127.0.0.1", "::1"}:
+        forwarded = request.headers.get("cf-connecting-ip", "")
+        try:
+            return str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            pass
+    return peer
 
 
 def digest(value):

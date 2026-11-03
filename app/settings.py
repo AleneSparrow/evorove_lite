@@ -51,3 +51,25 @@ def load(path=".env"):
     if len(settings.secret) < 32:
         raise ValueError("SECRET_KEY must contain at least 32 characters")
     return settings
+
+
+def password_cipher(settings):
+    """Lazy import keeps idle worker small; cryptography requires owner approval."""
+    import base64
+    import hashlib
+    import hmac
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        from fastapi import HTTPException
+        raise HTTPException(503, 'Mailbox password encryption is not installed') from None
+    key = hmac.new(settings.secret.encode(), b'evorove:mailbox-password:v1', hashlib.sha256).digest()
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+def encrypt_password(settings, password):
+    return password_cipher(settings).encrypt(password.encode()).decode()
+
+
+def decrypt_password(settings, encrypted):
+    return password_cipher(settings).decrypt(encrypted.encode()).decode()

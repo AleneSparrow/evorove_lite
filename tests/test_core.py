@@ -25,7 +25,7 @@ def settings(tmp_path):
 
 @pytest.fixture
 def client(settings):
-    with TestClient(create_app(settings), base_url='https://testserver', follow_redirects=False) as client:
+    with TestClient(create_app(settings, scheduler_enabled=False), base_url='https://testserver', follow_redirects=False) as client:
         yield client
 
 
