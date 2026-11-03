@@ -235,3 +235,45 @@ def test_expired_subscription_can_be_replaced(client, settings):
     old['meta']['event_name'] = 'subscription_updated'
     assert deliver(client, settings, old).status_code == 200
     assert business(settings)['subscription_status'] == 'active'
+
+
+def test_local_defaults_generate_persistent_secret(tmp_path, monkeypatch):
+    from app.settings import load
+    monkeypatch.chdir(tmp_path)
+    for key in ('SECRET_KEY', 'APP_BASE_URL', 'DB_PATH'):
+        monkeypatch.delenv(key, raising=False)
+    (tmp_path / '.env').write_text('SECRET_KEY=\nAPP_BASE_URL=\nDB_PATH=\n')
+    first = load()
+    assert len(first.secret) >= 32
+    assert first.secret == load().secret
+    assert first.base_url == 'https://localhost:8000'
+    assert first.db_path == 'evorove.sqlite3'
+    assert (tmp_path / '.local/dev-secret').stat().st_mode & 0o777 == 0o600
+    monkeypatch.setenv('APP_BASE_URL', 'https://evorove.example')
+    with pytest.raises(ValueError, match='SECRET_KEY'):
+        load()
+
+
+def test_local_mailbox_password_reset(tmp_path, monkeypatch, settings):
+    from email import message_from_string
+    monkeypatch.chdir(tmp_path)
+    settings.values['APP_BASE_URL'] = 'https://localhost:8000'
+    migrate(settings.db_path)
+    user = auth.signup(settings, 'dev@example.com', 'original password', 'Dev')
+    auth.request_reset(settings, 'dev@example.com', '127.0.0.1')
+    files = list((tmp_path / '.local/mailbox').glob('*.eml'))
+    assert len(files) == 1
+    assert files[0].stat().st_mode & 0o777 == 0o600
+    message = message_from_string(files[0].read_text())
+    body = message.get_payload(decode=True).decode()
+    link = re.search(r'https://localhost:8000/reset\?token=\S+', body)[0]
+    token = parse_qs(urlparse(link).query)['token'][0]
+    auth.reset_password(settings, token, 'replacement password')
+    assert auth.login(settings, 'dev@example.com', 'replacement password', '127.0.0.1') == user
+
+
+def test_env_example_has_only_empty_values():
+    from app.db import ROOT
+    entries = (ROOT / '.env.example').read_text().splitlines()
+    assert len(entries) == 21
+    assert all(line.endswith('=') and line.count('=') == 1 for line in entries)

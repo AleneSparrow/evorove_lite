@@ -1,5 +1,7 @@
 """One .env file; process environment overrides file values."""
 import os
+import secrets
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -9,7 +11,7 @@ class Settings:
     values: dict = field(repr=False)
 
     def get(self, name, default=""):
-        return self.values.get(name, default)
+        return self.values.get(name) or default
 
     @property
     def secret(self):
@@ -36,6 +38,16 @@ def load(path=".env"):
                 values[key.strip()] = value.strip().strip("\"'")
     values.update(os.environ)
     settings = Settings(values)
+    if not settings.secret and urlparse(settings.base_url).hostname in {"localhost", "127.0.0.1"}:
+        directory = Path(".local")
+        directory.mkdir(mode=0o700, exist_ok=True)
+        key_file = directory / "dev-secret"
+        try:
+            with open(key_file, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
+                file.write(secrets.token_urlsafe(48))
+        except FileExistsError:
+            pass
+        values["SECRET_KEY"] = key_file.read_text().strip()
     if len(settings.secret) < 32:
         raise ValueError("SECRET_KEY must contain at least 32 characters")
     return settings

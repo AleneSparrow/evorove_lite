@@ -116,4 +116,3 @@ def webhook(settings, payload, signature):
         db.execute("UPDATE businesses SET plan=?,subscription_status=?,ls_customer_id=?,ls_subscription_id=? WHERE id=?",
                    (plan, attributes["status"], str(attributes.get("customer_id", "")), subscription, business_id))
         db.execute("INSERT INTO log(business_id,event,detail,created_at) VALUES (?,'billing_applied',?,?)", (business_id, stamp, now()))
-

@@ -1,4 +1,7 @@
 import hashlib
+import os
+from pathlib import Path
+from urllib.parse import urlparse
 import re
 import secrets
 import smtplib
@@ -113,13 +116,20 @@ def current_user(settings, request):
 
 def send_reset(settings, recipient, token):
     host = settings.get("SYSTEM_SMTP_HOST")
-    if not host:
-        raise RuntimeError("System SMTP is not configured")
     message = EmailMessage()
-    message["From"] = settings.get("SYSTEM_SMTP_FROM")
+    message["From"] = settings.get("SYSTEM_SMTP_FROM", "dev@localhost")
     message["To"] = recipient
     message["Subject"] = "Reset your Evorove password"
     message.set_content(f"Reset your password within 30 minutes:\n{settings.base_url}/reset?token={token}\n")
+    if not host:
+        if urlparse(settings.base_url).hostname not in {"localhost", "127.0.0.1"}:
+            raise RuntimeError("System SMTP is not configured")
+        mailbox = Path(".local/mailbox")
+        mailbox.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = mailbox / (str(uuid4()) + ".eml")
+        with open(path, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
+            file.write(message.as_string())
+        return
     with smtplib.SMTP(host, int(settings.get("SYSTEM_SMTP_PORT", "587")), timeout=15) as smtp:
         smtp.starttls(context=ssl.create_default_context())
         if settings.get("SYSTEM_SMTP_USER"):
