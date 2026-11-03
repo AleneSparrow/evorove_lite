@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from . import billing, guards
 from .db import ROOT, connect, now
+from .llm import ask
 from .settings import decrypt_password, load
 
 SMTP_TIMEOUT = 15
@@ -89,20 +90,6 @@ REPLY_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['b
                 'properties': {'body': {'type': 'string'}}}
 
 _SETTINGS = None
-
-
-def ask(system: str, user: str, *, schema: dict | None = None, web_search: bool = False,
-        max_uses: int = 5, purpose: str) -> dict:
-    """Stand-in for app.llm.ask while agent 2's module is unmerged.
-
-    Same signature as the contract's llm.ask, so the merge replaces this whole
-    function with: from .llm import ask
-    """
-    try:
-        from .llm import ask as delegate
-    except ImportError:
-        raise RuntimeError('LLM is not installed') from None
-    return delegate(system, user, schema=schema, web_search=web_search, max_uses=max_uses, purpose=purpose)
 
 
 

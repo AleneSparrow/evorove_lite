@@ -480,12 +480,10 @@ def test_contract_signatures_stay_callable_without_keywords(settings, monkeypatc
         outreach.record_payment('biz-1', 'nobody', 'manual')
 
 
-def test_the_llm_seam_matches_the_contract_signature():
-    import inspect
-    signature = inspect.signature(outreach.ask)
-    assert list(signature.parameters) == ['system', 'user', 'schema', 'web_search', 'max_uses', 'purpose']
-    with pytest.raises(RuntimeError):
-        outreach.ask('s', 'u', purpose='probe')
+def test_the_llm_seam_is_the_real_llm_ask():
+    """llm.py is merged now: outreach.ask is app.llm.ask itself, not a stand-in."""
+    from app import llm
+    assert outreach.ask is llm.ask
 
 
 def test_record_payment_can_join_an_open_transaction(settings):
