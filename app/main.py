@@ -1,6 +1,7 @@
 import asyncio
 import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request, HTTPException
@@ -77,7 +78,21 @@ def create_app(settings=None, *, scheduler_enabled=True):
     def health(request: Request):
         with connect(request.app.state.settings.db_path) as db:
             db.execute("SELECT 1").fetchone()
-        return {"status": "ok"}
+            rows = {row['kind']: row['last_success_at'] for row in db.execute(
+                "SELECT kind,max(finished_at) AS last_success_at FROM runs "
+                "WHERE status='ok' GROUP BY kind")}
+        scheduler = {kind: {'last_success_at': rows.get(kind)}
+                     for kind in ('search', 'send', 'poll', 'summary')}
+        last_search = rows.get('search')
+        stale = True
+        if last_search:
+            try:
+                stamp = datetime.fromisoformat(last_search.replace('Z', '+00:00'))
+                if stamp.tzinfo is not None:
+                    stale = datetime.now(timezone.utc) - stamp.astimezone(timezone.utc) > timedelta(hours=26)
+            except (TypeError, ValueError):
+                pass
+        return {"status": "ok", "scheduler": scheduler, "stale": stale}
 
     @app.get("/")
     def home(request: Request):

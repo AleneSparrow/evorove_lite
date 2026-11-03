@@ -57,12 +57,42 @@ def deliver(client, settings, event):
 
 
 def test_migrations_and_health(client, settings):
-    assert client.get('/health').json() == {'status': 'ok'}
+    assert client.get('/health').json() == {
+        'status': 'ok',
+        'scheduler': {kind: {'last_success_at': None}
+                      for kind in ('search', 'send', 'poll', 'summary')},
+        'stale': True,
+    }
     migrate(settings.db_path)
     with connect(settings.db_path) as db:
         assert db.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert db.execute('PRAGMA foreign_keys').fetchone()[0] == 1
         assert db.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 2
+
+
+def test_health_reports_last_success_and_search_freshness(client, settings):
+    fresh = datetime.now(timezone.utc) - timedelta(hours=25)
+    old = fresh - timedelta(days=2)
+    with connect(settings.db_path) as db:
+        db.execute("INSERT INTO runs(id,kind,started_at,finished_at,status) VALUES ('search-old','search',?,?,'ok')",
+                   (old.isoformat(), old.isoformat()))
+        db.execute("INSERT INTO runs(id,kind,started_at,finished_at,status) VALUES ('search-failed','search',?,?,'failed')",
+                   (now(), now()))
+        db.execute("INSERT INTO runs(id,kind,started_at,finished_at,status) VALUES ('search-fresh','search',?,?,'ok')",
+                   (fresh.isoformat(), fresh.isoformat()))
+        db.execute("INSERT INTO runs(id,kind,started_at,finished_at,status) VALUES ('poll-ok','poll',?,?,'ok')",
+                   (old.isoformat(), old.isoformat()))
+    health = client.get('/health').json()
+    assert health['status'] == 'ok'
+    assert health['stale'] is False
+    assert health['scheduler']['search']['last_success_at'] == fresh.isoformat()
+    assert health['scheduler']['poll']['last_success_at'] == old.isoformat()
+    assert health['scheduler']['send']['last_success_at'] is None
+
+    stale = datetime.now(timezone.utc) - timedelta(hours=27)
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE runs SET finished_at=? WHERE id='search-fresh'", (stale.isoformat(),))
+    assert client.get('/health').json()['stale'] is True
 
 
 def test_signup_login_logout(client, settings):
