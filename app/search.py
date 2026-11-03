@@ -39,11 +39,21 @@ for _piece in _STATE_LINES.split("/"):
 GENERIC = set("info support sales contact hello office admin team enquiries inquiries help general noreply no-reply webmaster".split())
 FREE_MAIL = {"gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "hotmail.com", "live.com", "icloud.com", "aol.com", "proton.me", "protonmail.com"}
 ROLE_RE = re.compile(r"\b(co-founder|cofounder|founder|co-owner|owner|ceo|president|managing partner|proprietor|principal|director|head of sales|vp of sales|vice president of sales|sales director|chief revenue officer)\b", re.I)
-NAME_RE = re.compile(r"\b[A-Z][a-z]+(?:-[A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?){1,2}\b")
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 COMMERCIAL_RE = re.compile(r"\$\d|\b(?:discount|guarantee|warranty|refund)\b", re.I)
 LEADING = set("our the my your this a an meet read contact about get learn".split())
 NAME_STOP = {"contact us", "about us", "our team", "read more", "learn more", "privacy policy"}
+PAIN_STOP = set("""
+a an the of to and or for in on at by from with as into over under about after before
+between within without during per via than then so if but nor not no
+is are was were be been being am
+it its this that these those
+he she they them his her their our your my we you i me him
+herself himself itself themselves yourself ourselves
+do does did doing have has had having
+will would can could should may might must
+still every each all any some such very just also too already often always never
+here there when where who whom whose which what how why
+""".split())
 PAGE_PATHS = ("", "/about", "/team", "/contact")
 
 
@@ -135,14 +145,33 @@ def _one_sentence(value):
     return text
 
 
-def _clean_name(value):
-    words = str(value or "").split()
+def _company_words(company):
+    return {word.casefold() for word in re.findall(r"[A-Za-z]{2,}", company or "")}
+
+
+def _person_name(value, company):
+    """One to three capitalized words, with none taken from the company name."""
+    text = str(value or "")
+    if "\n" in text or "\r" in text:
+        return ""
+    words = text.split()
     while words and words[0].casefold() in LEADING:
         words.pop(0)
-    if not 2 <= len(words) <= 3 or any(not re.fullmatch(r"[A-Z][a-z]+(?:-[A-Z][a-z]+)?", word) for word in words):
+    if not 1 <= len(words) <= 3 or any(not re.fullmatch(r"[A-Z][a-z]+(?:-[A-Z][a-z]+)?", word) for word in words):
+        return ""
+    if any(word.casefold() in _company_words(company) for word in words):
         return ""
     name = " ".join(words)
     return "" if name.casefold() in NAME_STOP else name
+
+
+def _pain_grounded(pain, quote):
+    """Nouns and verbs left after the stop list must occur in the evidence quote."""
+    keywords = [word.casefold() for word in re.findall(r"[A-Za-z]+", pain) if len(word) > 1 and word.casefold() not in PAIN_STOP]
+    if not keywords:
+        return False
+    folded = quote.casefold()
+    return all(re.search(r"\b" + re.escape(word) + r"\b", folded) for word in keywords)
 
 
 def _own_email(email, website):
@@ -152,27 +181,6 @@ def _own_email(email, website):
     if not local or local in GENERIC or domain in FREE_MAIL:
         return False
     return bool(host) and (host == domain or host.endswith("." + domain))
-
-
-def _emails(text, website):
-    found = []
-    for match in EMAIL_RE.finditer(text or ""):
-        address = match.group(0).strip(".").lower()
-        if _own_email(address, website) and address not in found:
-            found.append(address)
-    return found
-
-
-def _email_for(name, addresses):
-    words = [word.casefold() for word in name.split()]
-    first, last = words[0], words[-1]
-    fallback = None
-    for address in addresses:
-        local = address.split("@", 1)[0]
-        if first in local or last in local:
-            return address
-        fallback = fallback or address
-    return fallback
 
 
 def materials_for(business, settings):
@@ -282,24 +290,7 @@ def _pages(website):
     return pages
 
 
-def _heuristic(pages, website):
-    for url, text in pages:
-        addresses = _emails(text, website)
-        for raw in text.split("."):
-            sentence = raw.strip()
-            role = ROLE_RE.search(sentence)
-            if not sentence or not role:
-                continue
-            for match in NAME_RE.finditer(sentence):
-                name = _clean_name(match.group(0))
-                email = _email_for(name, addresses) if name else None
-                if name and email:
-                    return {"name": name, "role": role.group(0), "email": email, "evidence_quote": sentence,
-                            "pain": _one_sentence(sentence), "source_url": url}
-    return None
-
-
-def _accept_person(parsed, pages, website, corpus, listed_url):
+def _accept_person(parsed, pages, website, corpus, listed_url, company):
     quote = str(parsed.get("evidence_quote") or "").strip()
     if not quote or len(quote) > 800:
         return None
@@ -312,9 +303,9 @@ def _accept_person(parsed, pages, website, corpus, listed_url):
     pain = _one_sentence(parsed.get("pain"))
     if not source_url or email not in page.lower() or not _own_email(email, website):
         return None
-    if not _clean_name(parsed.get("name")) or not role or not pain or _invented(pain, page + "\n" + corpus):
+    if not role or not pain or not _pain_grounded(pain, quote) or _invented(pain, page + "\n" + corpus):
         return None
-    return {"name": _clean_name(parsed.get("name")), "role": role.group(0), "email": email, "pain": pain,
+    return {"name": _person_name(parsed.get("name"), company), "role": role.group(0), "email": email, "pain": pain,
             "evidence_quote": quote, "source_url": source_url}
 
 
@@ -330,13 +321,8 @@ def _person(company, pages, website, corpus, forbidden, listed_url):
     try:
         parsed = ask(_prompt("search_people.md"), user, schema=PERSON_SCHEMA, purpose="decision_maker")
     except LLMRejected:
-        parsed = {}
-    if str(parsed.get("evidence_quote") or "").strip():
-        return _accept_person(parsed, pages, website, corpus, listed_url)
-    found = _heuristic(pages, website)
-    if found and found["pain"] and not _invented(found["pain"], "\n".join(text for _, text in pages)):
-        return found
-    return None
+        return None
+    return _accept_person(parsed, pages, website, corpus, listed_url, company)
 
 
 def _candidate(business, item, segments, corpus, forbidden):

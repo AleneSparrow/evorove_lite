@@ -231,13 +231,85 @@ def test_budget_stops_after_a_partial_run(db, monkeypatch):
     assert people(db) == []
 
 
-def test_model_abstains_and_the_page_heuristic_is_used(db, monkeypatch):
+def test_pain_words_missing_from_the_quote_are_dropped(db, monkeypatch):
+    person = dict(PERSON, pain="The owner still misses weekend bookings.")
+    install(monkeypatch, Messages(person=person))
+    assert search.run_search(business(db)) == []
+    assert people(db) == []
+
+
+def test_pain_that_reuses_quote_words_is_kept(db, monkeypatch):
+    person = dict(PERSON, pain="The owner answers every inquiry.")
+    install(monkeypatch, Messages(person=person))
+    found = search.run_search(business(db))
+    assert len(found) == 1
+    assert found[0]["pain"] == "The owner answers every inquiry."
+    assert found[0]["evidence_quote"] == PERSON["evidence_quote"]
+
+
+def test_model_abstains_and_no_person_is_saved(db, monkeypatch):
     empty = {"name": "", "role": "", "email": "", "pain": "", "evidence_quote": ""}
     install(monkeypatch, Messages(person=empty))
+    assert search.run_search(business(db)) == []
+    assert people(db) == []
+
+
+def test_rejected_person_read_does_not_invent_one(db, monkeypatch):
+    real = search.ask
+
+    def wrapped(*args, **kwargs):
+        if kwargs.get("purpose") == "decision_maker":
+            raise search.LLMRejected("no person")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(search, "ask", wrapped)
+    install(monkeypatch, Messages())
+    assert search.run_search(business(db)) == []
+    assert people(db) == []
+
+
+BETA_PAGE = """<html><body>
+<p>Beta IT Services
+Mark Stone is the owner.</p>
+<p>Email mark.stone@beta.example for the owner.</p>
+<p>The owner still answers every new inquiry herself.</p>
+</body></html>"""
+
+
+def beta_person(name):
+    person = {
+        "name": name, "role": "owner", "email": "mark.stone@beta.example",
+        "pain": "The owner still answers every new inquiry herself.",
+        "evidence_quote": "The owner still answers every new inquiry herself.",
+    }
+    candidate = dict(CANDIDATE, company="Beta IT Services", website="https://beta.example")
+    return person, candidate
+
+
+def test_newline_company_name_is_cleared_and_the_person_stays(db, monkeypatch):
+    person, candidate = beta_person("Beta IT Services\nMark Stone")
+    install(monkeypatch, Messages(person=person, candidates=[candidate]), BETA_PAGE)
     found = search.run_search(business(db))
-    assert found[0]["name"] == "Jane Alvarez" and found[0]["role"].lower() == "founder"
-    assert people(db)[0]["stage"] == "cold"
-    assert found[0]["evidence_quote"] in PAGE
+    assert len(found) == 1
+    assert found[0]["name"] == ""
+    assert found[0]["email"] == "mark.stone@beta.example"
+    assert found[0]["role"].lower() == "owner"
+    assert people(db)[0]["name"] == ""
+
+
+def test_company_word_used_as_a_name_is_cleared(db, monkeypatch):
+    person, candidate = beta_person("Services")
+    install(monkeypatch, Messages(person=person, candidates=[candidate]), BETA_PAGE)
+    found = search.run_search(business(db))
+    assert len(found) == 1 and found[0]["name"] == ""
+    assert found[0]["role"].lower() == "owner"
+
+
+def test_clean_name_without_company_words_is_kept(db, monkeypatch):
+    person, candidate = beta_person("Mark Stone")
+    install(monkeypatch, Messages(person=person, candidates=[candidate]), BETA_PAGE)
+    found = search.run_search(business(db))
+    assert found[0]["name"] == "Mark Stone"
 
 
 def test_client_zero_seeds_the_owner_brief(db, monkeypatch):
