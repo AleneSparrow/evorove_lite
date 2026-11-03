@@ -35,6 +35,7 @@ def person(settings, business_id, person_id):
         messages = [dict(item) for item in db.execute('SELECT * FROM messages WHERE person_id=? ORDER BY created_at,id', (person_id,))]
     result = dict(row)
     result['messages'] = messages
+    result['owner_supplied'] = result['source_url'] == 'owner'
     for key in ('source_url', 'website'):
         if urlparse(result.get(key) or '').scheme not in {'http', 'https'}:
             result[key] = None

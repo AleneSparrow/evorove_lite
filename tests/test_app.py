@@ -120,7 +120,7 @@ def test_find_people_runs_in_background_and_surfaces_failure(client, settings, m
     bid = business(settings)['id']
     assert form(client, '/app', '/app/find-people').status_code == 403
     with connect(settings.db_path) as db:
-        db.execute("UPDATE businesses SET subscription_status='active',brief='US founders'")
+        db.execute("UPDATE businesses SET plan='pro',subscription_status='active',brief='US founders'")
     called = []
     monkeypatch.setattr(scheduler.search, 'run_search', lambda business_id: called.append(business_id) or [{}, {}])
     assert form(client, '/app', '/app/find-people').status_code == 303
@@ -144,7 +144,7 @@ def test_search_preview_is_dry_run_and_has_no_send_actions(client, settings, mon
     signup(client)
     bid = business(settings)['id']
     with connect(settings.db_path) as db:
-        db.execute("UPDATE businesses SET subscription_status='active',brief='US service founders'")
+        db.execute("UPDATE businesses SET plan='pro',subscription_status='active',brief='US service founders'")
     calls = []
     candidates = [{
         'company': 'North Star LLC', 'website': 'https://north.example', 'us_state': 'TX',
@@ -175,7 +175,7 @@ def test_search_preview_is_dry_run_and_has_no_send_actions(client, settings, mon
 def test_search_preview_failure_hides_exception_message(client, settings, monkeypatch):
     signup(client)
     with connect(settings.db_path) as db:
-        db.execute("UPDATE businesses SET subscription_status='active',brief='US founders'")
+        db.execute("UPDATE businesses SET plan='pro',subscription_status='active',brief='US founders'")
     def fail(*args, **kwargs):
         raise RuntimeError('SECRET-MUST-NOT-LEAK')
     monkeypatch.setattr('app.main.search.run_search', fail)
@@ -219,7 +219,7 @@ def test_scheduler_due_times_dedup_and_failure(client, settings, monkeypatch):
     client.portal.call(jobs.tick, clock)
     assert scheduled == []  # unpaid and paused
     with connect(settings.db_path) as db:
-        db.execute("UPDATE businesses SET subscription_status='active',outreach_paused=0")
+        db.execute("UPDATE businesses SET plan='pro',subscription_status='active',outreach_paused=0")
     client.portal.call(jobs.tick, clock)
     assert [kind for _, kind, _ in scheduled] == ['search', 'send', 'poll']  # 08:00 Eastern, even though owner time is 20:00
     scheduled.clear()

@@ -11,7 +11,7 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, billing, board, outreach, search
+from . import auth, billing, board, contacts, outreach, search
 from .scheduler import Scheduler
 from .db import ROOT, connect, migrate, now
 from .settings import load
@@ -56,13 +56,18 @@ def create_app(settings=None, *, scheduler_enabled=True):
         response.set_cookie("csrf", nonce, secure=True, httponly=True, samesite="lax", max_age=3600)
         return response
 
-    async def form(request):
-        if request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
-            raise HTTPException(415, "Use a URL encoded form")
-        body = await request.body()
-        if len(body) > 16384:
-            raise HTTPException(413, "Form is too large")
-        fields = {key: values[0] for key, values in parse_qs(body.decode(), keep_blank_values=True).items()}
+    async def form(request, *, upload=False):
+        content_type = request.headers.get('content-type', '')
+        multipart = upload and content_type.split(';')[0] == 'multipart/form-data'
+        if not multipart and content_type.split(';')[0] != 'application/x-www-form-urlencoded':
+            raise HTTPException(415, 'Use a form or CSV upload')
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > (5_000_000 if upload else 16384):
+                raise HTTPException(413, 'Form is too large')
+        fields = contacts.multipart_fields(content_type, bytes(body)) if multipart else {
+            key: values[0] for key, values in parse_qs(body.decode(), keep_blank_values=True).items()}
         try:
             nonce = URLSafeTimedSerializer(request.app.state.settings.secret, salt="csrf").loads(fields.get("csrf", ""), max_age=3600)
             if not secrets.compare_digest(nonce, request.cookies.get("csrf", "")):
@@ -157,8 +162,9 @@ def create_app(settings=None, *, scheduler_enabled=True):
         user = auth.current_user(s, request)
         bid = user['business_id']
         selected = request.query_params.get('person')
-        return render(request, 'board.html', business=board.business(s, bid), columns=board.columns(s, bid),
-                      last=board.last_search(s, bid), person=board.person(s, bid, selected) if selected else None)
+        business = board.business(s, bid)
+        return render(request, 'board.html', business=business, columns=board.columns(s, bid),
+                      last=board.last_search(s, bid), can_search=billing.can_search(business), person=board.person(s, bid, selected) if selected else None)
 
     @app.get('/app/people/{person_id}')
     def person_detail(request: Request, person_id: str):
@@ -214,8 +220,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         s = request.app.state.settings
         user = auth.current_user(s, request)
         business = board.business(s, user['business_id'])
-        if business['subscription_status'] not in {'active', 'on_trial'}:
-            raise HTTPException(403, 'An active subscription is required')
+        billing.require_search(business)
         if not business['brief']:
             raise HTTPException(400, 'Add a search brief in Settings first')
         request.app.state.scheduler.dispatch(user['business_id'], 'search')
@@ -227,6 +232,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
     def search_preview(request: Request):
         s = request.app.state.settings
         user = auth.current_user(s, request)
+        billing.require_search(board.business(s, user['business_id']))
         return render(request, 'search_preview.html',
                       preview=request.app.state.search_previews.get(user['business_id']))
 
@@ -234,6 +240,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
     def search_preview_status(request: Request):
         s = request.app.state.settings
         user = auth.current_user(s, request)
+        billing.require_search(board.business(s, user['business_id']))
         return render(request, 'search_preview_results.html',
                       preview=request.app.state.search_previews.get(user['business_id']))
 
@@ -244,8 +251,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         user = auth.current_user(s, request)
         bid = user['business_id']
         business = board.business(s, bid)
-        if business['subscription_status'] not in {'active', 'on_trial'}:
-            raise HTTPException(403, 'An active subscription is required')
+        billing.require_search(business)
         if not business['brief']:
             raise HTTPException(400, 'Add a search brief in Settings first')
         current = request.app.state.search_previews.get(bid)
@@ -267,6 +273,38 @@ def create_app(settings=None, *, scheduler_enabled=True):
             return render(request, 'search_preview_results.html',
                           preview=request.app.state.search_previews.get(bid))
         return RedirectResponse('/app/search-preview', status_code=303)
+
+    @app.get('/app/contacts')
+    def contacts_page(request: Request):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        return render(request, 'contacts.html', report=None, columns=contacts.COLUMNS)
+
+    @app.post('/app/contacts')
+    async def add_contacts(request: Request):
+        fields = await form(request, upload=True)
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        business = board.business(s, user['business_id'])
+        if business['plan'] not in {'starter', 'pro'} or business['subscription_status'] != 'active':
+            raise HTTPException(403, 'An active Starter or Pro subscription is required')
+        rows = contacts.csv_rows(fields['csv']) if 'csv' in fields else [fields]
+        report = await run_in_threadpool(contacts.add, s, user['business_id'], rows)
+        return render(request, 'contacts.html', report=report, columns=contacts.COLUMNS)
+
+    @app.get('/app/billing')
+    def billing_page(request: Request):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        return render(request, 'billing.html', business=board.business(s, user['business_id']))
+
+    @app.post('/billing/portal')
+    async def billing_portal(request: Request):
+        await form(request)
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        url = await run_in_threadpool(billing.portal, s, user)
+        return RedirectResponse(url, status_code=303)
 
     @app.get('/app/settings')
     def settings_page(request: Request):

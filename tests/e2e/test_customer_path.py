@@ -87,7 +87,7 @@ def test_customer_path(monkeypatch, tmp_path):
             'meta': {'event_name': 'subscription_created', 'event_id': 'subscription-created-e2e',
                      'custom_data': {'business_id': bid}, 'test_mode': True},
             'data': {'type': 'subscriptions', 'id': 'sub-e2e', 'attributes': {
-                'variant_id': 100, 'customer_id': 7, 'status': 'active',
+                'variant_id': 200, 'customer_id': 7, 'status': 'active',
                 'updated_at': '2026-11-03T10:00:00Z', 'test_mode': True}},
         }
         assert webhook(client, settings, activation).status_code == 200

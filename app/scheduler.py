@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from . import notify, outreach, search
+from . import billing, notify, outreach, search
 from .db import connect, now, current_run_id
 
 PAID = {'active', 'on_trial'}
@@ -40,7 +40,14 @@ class Scheduler:
         context_token = current_run_id.set(run_id)
         try:
             if kind == 'search':
-                found, sent = len(search.run_search(business_id)), 0
+                day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                with connect(self.settings.db_path) as db:
+                    used = db.execute("SELECT count(*) FROM people WHERE business_id=? AND source_url!='owner' AND created_at>=?",
+                                      (business_id, day)).fetchone()[0]
+                remaining = max(0, 20 - used)
+                people = (search.run_search(business_id) if remaining == 20 else
+                          search.run_search(business_id, limit=remaining) if remaining else [])
+                found, sent = len(people), 0
             elif kind == 'send':
                 found, sent = 0, outreach.send_first_letters(business_id)
             elif kind == 'poll':
@@ -82,7 +89,7 @@ class Scheduler:
                 continue
             bid = business['id']
             day = current.replace(hour=0, minute=0, second=0, microsecond=0)
-            if current.hour >= 13:
+            if current.hour >= 13 and billing.can_search(business):
                 self.dispatch(bid, 'search', day.isoformat())
             for kind, interval in (('send', 15), ('poll', 5)):
                 # Scheduler opens a US-wide window; guards check each recipient immediately before SMTP.

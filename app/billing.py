@@ -43,6 +43,7 @@ def checkout(settings, user, plan):
     if business[0] in {"active", "on_trial", "cancelled"}:
         raise HTTPException(409, "A subscription already exists")
     body = {"data": {"type": "checkouts", "attributes": {
+        "checkout_options": {"skip_trial": True},
         "checkout_data": {"email": user["email"], "custom": {"business_id": user["business_id"], "plan": plan}},
         "product_options": {"redirect_url": settings.base_url + "/app", "enabled_variants": [int(variant)]}},
         "relationships": {"store": {"data": {"type": "stores", "id": settings.get("LEMONSQUEEZY_STORE_ID")}},
@@ -161,3 +162,32 @@ def webhook(settings, payload, signature):
         db.execute("UPDATE businesses SET plan=?,subscription_status=?,ls_customer_id=?,ls_subscription_id=? WHERE id=?",
                    (plan, attributes["status"], str(attributes.get("customer_id", "")), subscription, business_id))
         db.execute("INSERT INTO log(business_id,event,detail,created_at) VALUES (?,'billing_applied',?,?)", (business_id, stamp, now()))
+
+
+def can_search(business):
+    return business['plan'] == 'pro' and business['subscription_status'] == 'active'
+
+
+def require_search(business):
+    if not can_search(business):
+        raise HTTPException(403, 'Lead search requires an active Pro subscription')
+
+
+def portal(settings, user):
+    with connect(settings.db_path) as db:
+        row = db.execute('SELECT ls_subscription_id FROM businesses WHERE id=?', (user['business_id'],)).fetchone()
+    if not row or not row[0] or not settings.get('LEMONSQUEEZY_API_KEY'):
+        raise HTTPException(503, 'Subscription management is not configured')
+    try:
+        from urllib.parse import quote
+        response = httpx.get('https://api.lemonsqueezy.com/v1/subscriptions/' + quote(row[0], safe=''),
+                             headers={'Authorization': 'Bearer ' + settings.get('LEMONSQUEEZY_API_KEY'),
+                                      'Accept': 'application/vnd.api+json'}, timeout=15)
+        response.raise_for_status()
+        url = response.json()['data']['attributes']['urls']['customer_portal']
+        parsed = urlparse(url)
+        if parsed.scheme != 'https' or not (parsed.hostname or '').endswith('.lemonsqueezy.com'):
+            raise ValueError()
+        return url
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        raise HTTPException(502, 'Unable to open subscription management') from None
