@@ -407,5 +407,6 @@ def test_local_mailbox_password_reset(tmp_path, monkeypatch, settings):
 def test_env_example_has_only_empty_values():
     from app.db import ROOT
     entries = (ROOT / '.env.example').read_text().splitlines()
-    assert len(entries) == 21
+    assert {'MARKET_SIGNALS=', 'PER_RUN_TOKEN_BUDGET='} <= set(entries)
+    assert len(entries) == 23
     assert all(line.endswith('=') and line.count('=') == 1 for line in entries)

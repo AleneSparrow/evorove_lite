@@ -90,6 +90,8 @@ def webhook(settings, payload, signature):
         custom_data = meta.get("custom_data") or {}
         business_id = custom_data.get("business_id")
         person_id = custom_data.get("person_id")
+        if "person_id" in custom_data and (not isinstance(person_id, str) or not person_id.strip()):
+            raise ValueError()
         event_id = str(meta.get("event_id") or hashlib.sha256(payload).hexdigest())
         if not all(isinstance(container.get("test_mode", False), bool) for container in (meta, attributes)):
             raise ValueError()
@@ -102,7 +104,7 @@ def webhook(settings, payload, signature):
         if db.execute("SELECT 1 FROM billing_events WHERE event_id=?", (event_id,)).fetchone():
             return
         business = db.execute("SELECT * FROM businesses WHERE id=?", (business_id,)).fetchone() if business_id else None
-        if not business and subscription:
+        if not business and subscription and not person_id:
             business = db.execute("SELECT * FROM businesses WHERE ls_subscription_id=?", (subscription,)).fetchone()
         if not business:
             return
@@ -112,6 +114,21 @@ def webhook(settings, payload, signature):
         db.execute("INSERT INTO billing_events VALUES (?,?,?,?)", (event_id, business_id, stamp, now()))
         if test and (not owner or owner[0].lower() not in allowed):
             db.execute("INSERT INTO log(business_id,event,created_at) VALUES (?,'billing_test_ignored',?)", (business_id, now()))
+            return
+        if person_id:
+            # Customer offer payments never change the business's Evorove subscription.
+            if name not in {'order_created', 'subscription_payment_success'}:
+                return
+            if not db.execute('SELECT 1 FROM people WHERE business_id=? AND id=?', (business_id, person_id)).fetchone():
+                return
+            amount = attributes.get('total')
+            if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
+                raise HTTPException(400, 'Invalid payment amount')
+            prefix = 'order:' if name == 'order_created' else 'invoice:'
+            inserted = db.execute("INSERT OR IGNORE INTO payments(id,business_id,person_id,source,event_name,test_mode,amount_cents,raw_event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                                  (str(uuid4()), business_id, person_id, 'lemonsqueezy', name, int(test), amount, prefix + str(data['id']), now()))
+            if inserted.rowcount:
+                outreach.record_payment(business_id, person_id, 'lemonsqueezy', db=db)
             return
         if name in INVOICES:
             # Invoice events record money; subscription snapshots alone control access.
@@ -123,11 +140,6 @@ def webhook(settings, payload, signature):
                     raise HTTPException(400, "Invalid payment amount")
                 inserted = db.execute("INSERT OR IGNORE INTO payments(id,business_id,person_id,source,event_name,test_mode,amount_cents,raw_event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                                       (str(uuid4()), business_id, person_id, "lemonsqueezy", name, int(test), amount, "invoice:" + str(data["id"]), now()))
-                if inserted.rowcount and name == "subscription_payment_success" and person_id:
-                    try:
-                        outreach.record_payment(business_id, person_id, "lemonsqueezy", db=db)
-                    except ValueError:
-                        pass
             return
         if name in ORDERS:
             amount = attributes.get("total")
@@ -135,11 +147,6 @@ def webhook(settings, payload, signature):
                 raise HTTPException(400, "Invalid payment amount")
             inserted = db.execute("INSERT OR IGNORE INTO payments(id,business_id,person_id,source,event_name,test_mode,amount_cents,raw_event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                                   (str(uuid4()), business_id, person_id, "lemonsqueezy", name, int(test), amount, "order:" + str(data["id"]), now()))
-            if inserted.rowcount and person_id:
-                try:
-                    outreach.record_payment(business_id, person_id, "lemonsqueezy", db=db)
-                except ValueError:
-                    pass
             return
         variants = {settings.get("LEMONSQUEEZY_VARIANT_STARTER"): "starter", settings.get("LEMONSQUEEZY_VARIANT_PRO"): "pro"}
         plan = variants.get(str(attributes.get("variant_id")))

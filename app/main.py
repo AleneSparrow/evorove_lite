@@ -43,9 +43,9 @@ def create_app(settings=None, *, scheduler_enabled=True):
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Cache-Control"] = "no-store"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; form-action 'self' https://*.lemonsqueezy.com"
         return response
 
     def render(request, template, **context):
@@ -70,7 +70,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         except BadSignature:
             raise HTTPException(403, "Reload the page and try again") from None
         origin = request.headers.get("origin")
-        if origin and origin.rstrip("/") != request.app.state.settings.base_url:
+        if origin == "null" or (origin and origin.rstrip("/") != request.app.state.settings.base_url):
             raise HTTPException(403, "Invalid origin")
         return fields
 
@@ -174,9 +174,13 @@ def create_app(settings=None, *, scheduler_enabled=True):
         s = request.app.state.settings
         user = auth.current_user(s, request)
         person = board.person(s, user['business_id'], person_id)
-        if person['stage'] != 'done':
+        if person['stage'] not in {'offer_made', 'done'}:
+            raise HTTPException(409, 'Payment can only be recorded after an offer')
+        if person['stage'] == 'done':
+            return render(request, 'person.html', person=person)
+        if person['stage'] == 'offer_made':
             try:
-                await run_in_threadpool(outreach.record_payment, user['business_id'], person_id, 'manual')
+                await run_in_threadpool(outreach.record_payment, user['business_id'], person_id, 'manual', settings=s)
             except ValueError:
                 raise HTTPException(404, 'Person not found') from None
         with connect(s.db_path) as db:

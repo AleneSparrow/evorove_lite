@@ -88,7 +88,7 @@ def test_owner_can_confirm_manual_payment(client, settings, monkeypatch):
     assert form(client, '/app/people/' + pid, '/app/people/' + pid + '/payment').status_code == 400
 
     calls = []
-    def record_payment(business_id, person_id, source):
+    def record_payment(business_id, person_id, source, *, settings=None):
         calls.append((business_id, person_id, source))
         with connect(settings.db_path) as db:
             db.execute("UPDATE people SET stage='done',updated_at=? WHERE id=? AND business_id=?",
