@@ -185,6 +185,13 @@ def create_app(settings=None, *, scheduler_enabled=True):
                         f"manual:{user['business_id']}:{person_id}", now()))
         return render(request, 'person.html', person=board.person(s, user['business_id'], person_id))
 
+    @app.get('/app/metrics')
+    def metrics_page(request: Request):
+        s = request.app.state.settings
+        user = auth.current_user(s, request)
+        bid = user['business_id']
+        return render(request, 'metrics.html', business=board.business(s, bid), **board.metrics(s, bid))
+
     @app.get('/app/columns')
     def board_columns(request: Request):
         s = request.app.state.settings

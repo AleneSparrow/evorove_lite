@@ -1,0 +1,8 @@
+{% extends 'base.html' %}{% block title %}Metrics · Evorove{% endblock %}{% block content %}
+<div class="page-heading"><div><p class="eyebrow">{{ business.name }}</p><h1>What happened.</h1><p>Today, the last 7 days, and the last 30 days. Times are UTC, and today starts at midnight UTC. Each column counts what happened in that window.</p></div><a class="button secondary" href="/app">Back to the board</a></div>
+<div class="table-scroll"><table>
+<thead><tr><th scope="col">Step</th>{% for label in columns %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead>
+<tbody>{% for row in rows %}<tr><th scope="row">{{ row.label }}</th>{% for cell in row.cells %}<td>{{ cell.count }}{% if cell.rate is not none %}<br><small class="muted">{{ cell.rate }}% of the previous step</small>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
+</table></div>
+<p class="muted">Found counts people added to the board. First letters are outbound messages marked greet. Replied counts inbound messages. Reached an offer counts outbound messages marked offer. Paid leaves out test payments. Unsubscribed counts suppressions whose reason is unsubscribe. Tokens are input plus output on runs. Searches are runs whose kind is search.</p>
+{% endblock %}
