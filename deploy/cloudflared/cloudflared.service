@@ -1,0 +1,22 @@
+[Unit]
+Description=Cloudflare Tunnel for Evorove
+Wants=network-online.target
+After=network-online.target evorove.service
+
+[Service]
+Type=notify
+User=cloudflared
+Group=cloudflared
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --loglevel info run --token-file /etc/cloudflared/evorove.token
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=0
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

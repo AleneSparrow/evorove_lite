@@ -1,0 +1,28 @@
+[Unit]
+Description=Evorove web application
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=evorove
+Group=evorove
+WorkingDirectory=/opt/evorove
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/evorove/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers --no-access-log
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+MemoryMax=300M
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/evorove
+
+[Install]
+WantedBy=multi-user.target

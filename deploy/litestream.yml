@@ -1,0 +1,10 @@
+dbs:
+  - path: /var/lib/evorove/evorove.sqlite3
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_R2_BUCKET}
+      path: evorove.sqlite3
+      endpoint: ${LITESTREAM_R2_ENDPOINT}
+      region: auto
+      access-key-id: ${LITESTREAM_R2_ACCESS_KEY_ID}
+      secret-access-key: ${LITESTREAM_R2_SECRET_ACCESS_KEY}
