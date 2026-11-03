@@ -18,7 +18,7 @@ import json
 import re
 import smtplib
 import ssl
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
@@ -103,6 +103,18 @@ def ask(system: str, user: str, *, schema: dict | None = None, web_search: bool 
     except ImportError:
         raise RuntimeError('LLM is not installed') from None
     return delegate(system, user, schema=schema, web_search=web_search, max_uses=max_uses, purpose=purpose)
+
+
+def payment_link_for(business, person_id: str) -> str:
+    """Stand-in for billing.payment_link_for while the glue agent's version is
+    unmerged. Same signature, so the merge replaces this whole function with:
+    from .billing import payment_link_for
+    """
+    try:
+        from .billing import payment_link_for as delegate
+    except ImportError:
+        return (business['payment_link'] or '').strip()
+    return delegate(business, person_id)
 
 
 def settings_or_default(settings):
@@ -224,7 +236,7 @@ def compose_reply(business, person, inbound, analysis, move, *, llm=None):
     ok, _ = validate(text, move, facts)
     body = text.strip() if ok else SAFE_FALLBACK[move]
     if move == OFFER:
-        body = body + '\n\n' + business['offer_text'].strip() + '\n\n' + business['payment_link'].strip()
+        body = body + '\n\n' + business['offer_text'].strip() + '\n\n' + payment_link_for(business, person['id'])
     return body + '\n\n' + (business['sender_name'] or business['name'] or '').strip()
 
 
@@ -237,25 +249,41 @@ def smtp_send(target, message):
         client.send_message(message)
 
 
-def imap_fetch(target, last_uid):
+def imap_fetch(target, last_uid, last_uidvalidity=None):
     """New INBOX messages after last_uid, read-only. The first read only records
-    where the inbox is, so old mail is never mistaken for a reply."""
+    where the inbox is, so old mail is never mistaken for a reply.
+
+    Returns (messages, newest_uid, uidvalidity). UIDVALIDITY identifies this
+    incarnation of the mailbox: a provider may reuse UIDs after a rebuild, so a
+    changed value means the stored last_uid no longer means anything. In that
+    case we fall back to reading the last 7 days by date; handle_reply's
+    Message-ID check keeps that re-read from duplicating an answered message.
+    """
     client = imaplib.IMAP4_SSL(target['host'], target['port'], ssl_context=ssl.create_default_context(),
                                timeout=IMAP_TIMEOUT)
     try:
         client.login(target['user'], target['password'])
         client.select('INBOX', readonly=True)
-        _, data = client.uid('SEARCH', None, 'UNSEEN' if last_uid is None else 'UID %d:*' % (last_uid + 1))
-        uids = sorted(int(uid) for uid in (data[0] or b'').split())
+        uidvalidity = int((client.untagged_responses.get('UIDVALIDITY') or [b'0'])[0])
+        reset = last_uid is not None and last_uidvalidity is not None and uidvalidity != last_uidvalidity
         if last_uid is None:
-            return [], (uids[-1] if uids else 0)
+            _, data = client.uid('SEARCH', None, 'ALL')
+            uids = sorted(int(uid) for uid in (data[0] or b'').split())
+            return [], (uids[-1] if uids else 0), uidvalidity
+        if reset:
+            since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%d-%b-%Y')
+            _, data = client.uid('SEARCH', None, 'SINCE', since)
+            candidates = sorted(int(uid) for uid in (data[0] or b'').split())
+        else:
+            _, data = client.uid('SEARCH', None, 'UID %d:*' % (last_uid + 1))
+            candidates = [uid for uid in sorted(int(uid) for uid in (data[0] or b'').split()) if uid > last_uid]
         messages = []
-        for uid in [uid for uid in uids if uid > last_uid][:MAX_PER_POLL]:
+        for uid in candidates[:MAX_PER_POLL]:
             _, parts = client.uid('FETCH', str(uid), '(BODY.PEEK[])')
             raw = next((part[1] for part in parts if isinstance(part, tuple)), None)
             if raw is not None:
                 messages.append(parse_email(uid, raw))
-        return messages, (messages[-1]['uid'] if messages else last_uid)
+        return messages, (messages[-1]['uid'] if messages else last_uid), uidvalidity
     finally:
         try:
             client.logout()
@@ -401,16 +429,16 @@ def send_first_letters(business_id: str, *, settings=None, send=None, now_utc=No
 # --- replies ----------------------------------------------------------------
 
 def read_cursor(settings, business_id):
+    """The stored IMAP read position, for callers that only need the UID."""
     with connect(settings.db_path) as db:
-        row = db.execute("SELECT detail FROM log WHERE business_id=? AND event='imap_cursor' "
-                         'ORDER BY id DESC LIMIT 1', (business_id,)).fetchone()
-    return int(row[0]) if row and str(row[0]).isdigit() else None
+        row = db.execute('SELECT imap_last_uid FROM businesses WHERE id=?', (business_id,)).fetchone()
+    return row['imap_last_uid'] if row else None
 
 
-def write_cursor(settings, business_id, uid):
+def write_cursor(settings, business_id, uid, uidvalidity):
     with connect(settings.db_path) as db:
-        db.execute('INSERT INTO log(business_id,event,detail,created_at) VALUES (?,?,?,?)',
-                   (business_id, 'imap_cursor', str(uid), now()))
+        db.execute('UPDATE businesses SET imap_last_uid=?,imap_uidvalidity=? WHERE id=?',
+                   (uid, uidvalidity, business_id))
 
 
 def match_person(db, business_id, message):
@@ -437,8 +465,8 @@ def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=
     business = dict(row)
     if not (business['imap_host'] and business['imap_user'] and business['imap_password_enc']):
         return 0
-    last_uid = read_cursor(settings, business_id)
-    messages, newest = fetch(mailbox(settings, business, 'imap'), last_uid)
+    last_uid, last_uidvalidity = business['imap_last_uid'], business['imap_uidvalidity']
+    messages, newest, uidvalidity = fetch(mailbox(settings, business, 'imap'), last_uid, last_uidvalidity)
     cursor = last_uid if messages else newest
     own = (business['smtp_user'] or '').strip().lower()
     received = 0
@@ -449,8 +477,8 @@ def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=
         except Exception:
             break  # retried on the next sweep; the cursor is not advanced past it
         cursor = message['uid']
-    if cursor is not None and cursor != last_uid:
-        write_cursor(settings, business_id, cursor)
+    if cursor is not None and (cursor != last_uid or uidvalidity != last_uidvalidity):
+        write_cursor(settings, business_id, cursor, uidvalidity)
     return received
 
 

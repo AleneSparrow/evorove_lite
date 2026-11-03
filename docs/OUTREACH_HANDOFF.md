@@ -9,14 +9,22 @@
 `unsubscribe_url()`, `unsubscribe_headers()` (RFC 8058), `suppress()`,
 `recipient_zone()`, `US_STATE_ZONES`.
 
-`app/outreach.py` (529 строк) — `send_first_letters()`, `poll_replies()`,
+`app/outreach.py` (565 строк) — `send_first_letters()`, `poll_replies()`,
 `record_payment()` с подписями договора, плюс политика ходов, валидатор,
 SMTP/IMAP-транспорты и разбор писем.
 
 `app/prompts/sales_analysis.md` — описание входящего письма (модель не выбирает
 ход). `app/prompts/sales_reply.md` — формулировка уже выбранного хода.
 
-Схема БД не менялась, новых зависимостей нет.
+Миграция `003_outreach_imap_cursor.sql` добавляет
+`businesses.imap_last_uid`/`imap_uidvalidity` (см. «Решения» ниже). Это
+единственная правка схемы. Новых зависимостей нет.
+
+Обновление по ходу работы агента glue: правки `billing.py` (Done по
+`custom_data.person_id`) и кнопку «Record payment» в `main.py`/`person.html`
+(пункты 1–2 ниже) делает агент в `feat/glue` — он учитывает этот файл, я их не
+трогала. Оставляю инструкции как есть — они описывают контракт с моей
+стороны (`record_payment(..., db=db)`, проверка владения `business_id`).
 
 ## Правки, которые нужны вне моей зоны
 
@@ -56,13 +64,10 @@ return
 привязана к `business_id`, так что чужой `person_id` в `custom_data`
 злоумышленника ничего не даёт.
 
-**(в)** Чтобы `person_id` вообще приходил, ссылка оплаты для конкретного
-человека должна нести его в `custom`. Это касается не `checkout()` (он
-продаёт подписку самой Evorove), а поля `businesses.payment_link`, которое
-владелец заполняет руками. Пока владелец не добавит в ссылку
-`?checkout[custom][person_id]=<id>`, Done по вебхуку не наступит — останется
-ручная кнопка из пункта 2. Решение за владельцем; мой код работает в обоих
-случаях.
+**(в)** Чтобы `person_id` вообще приходил, письмо с оффером должно слать
+персональную ссылку, а не сырой `businesses.payment_link`. Это уже сделано с
+моей стороны через `billing.payment_link_for(business, person_id)` — см.
+пункт 5.
 
 ### 2. `app/main.py` + `app/templates/person.html` — кнопка «Record payment»
 
@@ -130,15 +135,49 @@ found, sent = outreach.poll_replies(business_id, settings=self.settings), 0
 
 Параметры именованные и необязательные, подпись договора не нарушается.
 
+### 5. `app/billing.py` — `payment_link_for(business, person_id)`
+
+`outreach.py` зовёт эту функцию при отправке оффера вместо сырого
+`business['payment_link']`, чтобы в вебхук пришёл `custom_data.person_id` (см.
+пункт 1в). До слияния у меня в `outreach.py` — тонкая заглушка с той же
+подписью (как `ask()` для `llm.py`): она пытается `from .billing import
+payment_link_for`, а если модуля ещё нет — просто отдаёт
+`business['payment_link'].strip()`.
+
+Контракт для billing-агента:
+
+```python
+def payment_link_for(business: dict, person_id: str) -> str:
+    """Per-person checkout link carrying custom_data.person_id, so the webhook
+    can close the right card. business['payment_link'] is the owner's base
+    Lemon Squeezy URL; append the checkout custom-data query params to it."""
+```
+
+Например, добавить `?checkout[custom][person_id]=<person_id>` (и
+`checkout[custom][business_id]=<business['id']>`, если вебхуку так проще) к
+`business['payment_link']`. Когда функция появится в `app/billing.py`, в
+`app/outreach.py` нужно удалить заглушку `payment_link_for` целиком и
+поставить:
+
+```python
+from .billing import payment_link_for
+```
+
+Больше ничего в `outreach.py` менять не нужно — вызов уже
+`payment_link_for(business, person['id'])` внутри `compose_reply`.
+
 ## Решения, о которых нужно знать
 
-**Курсор IMAP лежит в `log`, не в отдельной колонке.** Схема — общая правда, и
-менять её ради одного числа я не стал. `poll_replies` пишет строку
-`event='imap_cursor', detail='<uid>'` и читает последнюю. Первый опрос ящика
-только запоминает позицию и не отвечает на старую почту. Минус: строки
-копятся (одна на цикл с новой почтой, раз в 5 минут максимум). Если решите
-добавить `businesses.imap_last_uid` отдельной миграцией — у меня меняются
-только `read_cursor`/`write_cursor`.
+**Курсор IMAP теперь на самой строке business, не в `log`.** Миграция
+`003_outreach_imap_cursor.sql` добавляет `businesses.imap_last_uid` и
+`imap_uidvalidity`. Первый опрос ящика только запоминает позицию (не читает
+`UNSEEN` — это было багом в первой версии: пустой `UNSEEN` на старом ящике
+обнулял курсор и на следующем опросе читал всё подряд; теперь это `SEARCH
+ALL`, только чтобы найти текущий максимальный UID). Если провайдер
+пересобрал ящик и `UIDVALIDITY` изменился, старый диапазон UID ничего не
+значит — `imap_fetch` тогда ищет `SINCE` за последние 7 дней вместо `UID
+N:*`; `handle_reply` всё равно отвечает один раз на каждое письмо, потому что
+дедуп идёт по `Message-ID`, а не по UID.
 
 **Часовой пояс получателя — из `people.us_state`**, таблица в
 `guards.US_STATE_ZONES`. Старый код выводил зону из ZIP-префиксов, но в этой
@@ -176,10 +215,13 @@ found, sent = outreach.poll_replies(business_id, settings=self.settings), 0
 
 ## Тесты
 
-`make test` — 96 passed (41 было, 55 моих). Сети нет: SMTP и IMAP
+`make test` — 102 passed (41 было, 61 мой). Сети нет: SMTP и IMAP
 подменяются вызываемыми объектами, LLM — заглушкой; письма собираются
 настоящим `email.message.EmailMessage` и разбираются тем же
-`outreach.parse_email`, что и реальный IMAP.
+`outreach.parse_email`, что и реальный IMAP. Для самой `imap_fetch` (а не
+только для инжектируемой замены `fetch=`) есть отдельная заглушка
+`imaplib.IMAP4_SSL`, которая проверяет три ветки: первый опрос, обычное
+продолжение по UID и перечитывание за 7 дней при смене `UIDVALIDITY`.
 
 Запускались из воркдерева `~/dev/evorove_lite-outreach` интерпретатором
 `../evorove_lite/.venv/bin/python` — в самом воркдереве `.venv` нет.

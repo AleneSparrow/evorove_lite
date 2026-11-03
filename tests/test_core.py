@@ -62,7 +62,7 @@ def test_migrations_and_health(client, settings):
     with connect(settings.db_path) as db:
         assert db.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert db.execute('PRAGMA foreign_keys').fetchone()[0] == 1
-        assert db.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 2
+        assert db.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 3
 
 
 def test_signup_login_logout(client, settings):

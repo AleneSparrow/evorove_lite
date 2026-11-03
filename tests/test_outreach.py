@@ -61,12 +61,12 @@ def inbound(text, *, sender='dana@clinic.example', subject='Re: A note for Dana'
     return outreach.parse_email(uid, message.as_bytes())
 
 
-def fake_imap(messages, newest=None):
+def fake_imap(messages, newest=None, uidvalidity=1):
     """`newest` stands in for a first-ever poll, which only records the position."""
-    def fetch(target, last_uid):
+    def fetch(target, last_uid, last_uidvalidity=None):
         if newest is not None:
-            return [], newest
-        return messages, (messages[-1]['uid'] if messages else last_uid)
+            return [], newest, uidvalidity
+        return messages, (messages[-1]['uid'] if messages else last_uid), uidvalidity
     return fetch
 
 
@@ -496,3 +496,123 @@ def test_record_payment_can_join_an_open_transaction(settings):
         db.execute('BEGIN IMMEDIATE')
         outreach.record_payment('biz-1', person['id'], 'lemonsqueezy', db=db)
     assert people(settings)[0]['stage'] == 'done'
+
+
+def test_the_payment_link_seam_matches_the_contract_signature():
+    import inspect
+    signature = inspect.signature(outreach.payment_link_for)
+    assert list(signature.parameters) == ['business', 'person_id']
+    # Falls back to the raw link while billing.payment_link_for is unmerged.
+    assert outreach.payment_link_for({'payment_link': ' https://pay.example.com/acme '}, 'person-1') \
+        == 'https://pay.example.com/acme'
+
+
+# --- the IMAP cursor: stored on businesses, resilient to UIDVALIDITY changes -
+
+def _raw_email(message_id, text='Hello', sender='dana@clinic.example'):
+    message = EmailMessage()
+    message['From'] = sender
+    message['To'] = 'sales@acme.example'
+    message['Subject'] = 'Hi'
+    message['Message-ID'] = message_id
+    message.set_content(text)
+    return message.as_bytes()
+
+
+class _FakeImapClient:
+    """A minimal double for imaplib.IMAP4_SSL, enough to drive imap_fetch
+    itself (the fake used elsewhere replaces imap_fetch wholesale)."""
+
+    def __init__(self, mail, uidvalidity):
+        self._mail, self._uidvalidity = mail, uidvalidity
+        self.untagged_responses = {}
+
+    def login(self, user, password):
+        pass
+
+    def select(self, name, readonly=True):
+        self.untagged_responses['UIDVALIDITY'] = [str(self._uidvalidity).encode()]
+        return 'OK', [b'1']
+
+    def uid(self, command, *args):
+        if command == 'SEARCH':
+            criterion = args[1]
+            if criterion in ('ALL', 'SINCE'):
+                matched = sorted(self._mail)
+            else:  # 'UID <n>:*'
+                floor = int(criterion.split()[1].split(':')[0])
+                matched = sorted(uid for uid in self._mail if uid >= floor)
+            return 'OK', [' '.join(str(uid) for uid in matched).encode()]
+        if command == 'FETCH':
+            return 'OK', [(b'uid fetch', self._mail[int(args[0])])]
+        raise AssertionError(command)
+
+    def logout(self):
+        pass
+
+
+def test_imap_fetch_first_poll_only_records_the_newest_uid(monkeypatch):
+    mail = {3: _raw_email('<a@x>'), 7: _raw_email('<b@x>')}
+    monkeypatch.setattr(outreach.imaplib, 'IMAP4_SSL', lambda *a, **k: _FakeImapClient(mail, 42))
+    target = {'host': 'h', 'port': 993, 'user': 'u', 'password': 'p'}
+    messages, newest, uidvalidity = outreach.imap_fetch(target, None, None)
+    assert messages == []
+    assert (newest, uidvalidity) == (7, 42)
+
+
+def test_imap_fetch_resumes_from_the_stored_uid(monkeypatch):
+    mail = {3: _raw_email('<a@x>'), 7: _raw_email('<b@x>'), 9: _raw_email('<c@x>')}
+    monkeypatch.setattr(outreach.imaplib, 'IMAP4_SSL', lambda *a, **k: _FakeImapClient(mail, 42))
+    target = {'host': 'h', 'port': 993, 'user': 'u', 'password': 'p'}
+    messages, newest, uidvalidity = outreach.imap_fetch(target, 3, 42)
+    assert [message['uid'] for message in messages] == [7, 9]
+    assert (newest, uidvalidity) == (9, 42)
+
+
+def test_imap_fetch_rereads_seven_days_when_uidvalidity_changes(monkeypatch):
+    # The provider rebuilt the mailbox: UID 2 in this namespace has nothing to
+    # do with UID 2 the old namespace already answered, so the UID range is
+    # abandoned in favour of a date search.
+    mail = {2: _raw_email('<unrelated-to-old-uid-2@x>'), 5: _raw_email('<new@x>')}
+    monkeypatch.setattr(outreach.imaplib, 'IMAP4_SSL', lambda *a, **k: _FakeImapClient(mail, 99))
+    target = {'host': 'h', 'port': 993, 'user': 'u', 'password': 'p'}
+    messages, newest, uidvalidity = outreach.imap_fetch(target, 50, 42)
+    assert sorted(message['uid'] for message in messages) == [2, 5]
+    assert (newest, uidvalidity) == (5, 99)
+
+
+def test_poll_replies_persists_the_cursor_on_the_business_row(settings):
+    make_business(settings)
+    make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    first = smtp.sent[0]['Message-ID']
+    outreach.poll_replies('biz-1', settings=settings, send=smtp,
+                          fetch=fake_imap([inbound('Hi.', in_reply_to=first, uid=50)], uidvalidity=100),
+                          llm=stub_llm())
+    with connect(settings.db_path) as db:
+        row = db.execute('SELECT imap_last_uid,imap_uidvalidity FROM businesses WHERE id=?', ('biz-1',)).fetchone()
+    assert (row['imap_last_uid'], row['imap_uidvalidity']) == (50, 100)
+
+
+def test_a_mailbox_rebuild_rereads_without_duplicating_the_reply(settings):
+    make_business(settings)
+    make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    first = smtp.sent[0]['Message-ID']
+    reply = inbound('Tell me more.', in_reply_to=first, uid=50)
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp,
+                                 fetch=fake_imap([reply], uidvalidity=100), llm=stub_llm()) == 1
+    assert len(smtp.sent) == 2  # first letter + one reply
+
+    # UIDVALIDITY changed: the provider hands back the SAME message under a
+    # new, unrelated UID. It is recognised by Message-ID and not re-answered.
+    reread = inbound('Tell me more.', in_reply_to=first, uid=9)
+    reread['message_id'] = reply['message_id']
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp,
+                                 fetch=fake_imap([reread], uidvalidity=200), llm=stub_llm()) == 0
+    assert len(smtp.sent) == 2  # no duplicate reply
+    with connect(settings.db_path) as db:
+        row = db.execute('SELECT imap_last_uid,imap_uidvalidity FROM businesses WHERE id=?', ('biz-1',)).fetchone()
+    assert (row['imap_last_uid'], row['imap_uidvalidity']) == (9, 200)
