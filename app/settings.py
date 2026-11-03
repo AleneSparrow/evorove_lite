@@ -54,7 +54,7 @@ def load(path=".env"):
 
 
 def password_cipher(settings):
-    """Lazy import keeps idle worker small; cryptography requires owner approval."""
+    """Fernet with a domain-separated key; cryptography approved by the owner."""
     import base64
     import hashlib
     import hmac

@@ -292,3 +292,48 @@ def test_password_save_fails_closed_without_cipher(client, settings, monkeypatch
     assert response.status_code == 503
     assert 'NEVER-SAVE-PLAINTEXT' not in response.text
     assert business(settings)['smtp_password_enc'] is None
+
+
+def test_mailbox_cipher_roundtrip_nonce_and_integrity(settings):
+    from cryptography.fernet import InvalidToken
+    from app.settings import Settings, encrypt_password, decrypt_password
+    secret = 'smtp-test-password-☃'
+    first = encrypt_password(settings, secret)
+    second = encrypt_password(settings, secret)
+    assert first != second
+    assert secret not in first
+    assert decrypt_password(settings, first) == secret
+    other = Settings(settings.values | {'SECRET_KEY': 'different-key-' * 4})
+    with pytest.raises(InvalidToken):
+        decrypt_password(other, first)
+    tampered = first[:20] + ('A' if first[20] != 'A' else 'B') + first[21:]
+    with pytest.raises(InvalidToken):
+        decrypt_password(settings, tampered)
+
+
+def test_mailbox_passwords_encrypted_preserved_and_not_echoed(client, settings):
+    from app.settings import decrypt_password
+    signup(client)
+    fields = {'postal_address': '12 Main Street, Austin TX', 'daily_cap': '20',
+              'quiet_start': '20:00', 'quiet_end': '08:00', 'outreach_paused': 'on',
+              'smtp_password': 'SMTP-PRIVATE-PASSWORD', 'imap_password': 'IMAP-PRIVATE-PASSWORD'}
+    assert form(client, '/app/settings', **fields).status_code == 303
+    saved = business(settings)
+    for protocol in ('smtp', 'imap'):
+        ciphertext = saved[protocol + '_password_enc']
+        assert ciphertext and fields[protocol + '_password'] not in ciphertext
+        assert decrypt_password(settings, ciphertext) == fields[protocol + '_password']
+        page = client.get('/app/settings').text
+        assert ciphertext not in page and fields[protocol + '_password'] not in page
+    # Empty fields keep both existing ciphertexts; updating one leaves the other intact.
+    assert form(client, '/app/settings', **(fields | {'smtp_password': '', 'imap_password': ''})).status_code == 303
+    kept = business(settings)
+    assert kept['smtp_password_enc'] == saved['smtp_password_enc']
+    assert kept['imap_password_enc'] == saved['imap_password_enc']
+    assert form(client, '/app/settings', **(fields | {'smtp_password': 'REPLACEMENT', 'imap_password': ''})).status_code == 303
+    replaced = business(settings)
+    assert decrypt_password(settings, replaced['smtp_password_enc']) == 'REPLACEMENT'
+    assert replaced['imap_password_enc'] == saved['imap_password_enc']
+    with connect(settings.db_path) as db:
+        logs = str([tuple(row) for row in db.execute('SELECT * FROM log')])
+    assert 'SMTP-PRIVATE-PASSWORD' not in logs and 'IMAP-PRIVATE-PASSWORD' not in logs
