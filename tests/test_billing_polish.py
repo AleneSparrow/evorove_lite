@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from selectolax.lexbor import LexborHTMLParser
 
-from app import scheduler
+from app import billing, scheduler
 from app.db import connect
 from test_core import client, settings, signup, business
 from test_pricing import activate
@@ -25,7 +25,7 @@ def test_board_subscription_actions(client, settings, status, ends, access):
     assert ('Start your subscription' in html) == (not access)
     assert ('/billing/checkout/' in html) == (not access)
     assert ('Subscription ends 2099-01-01' in html) == (access and status == 'cancelled')
-    assert ('href="/billing/portal"' in html) == (access and status == 'cancelled')
+    assert ('<form method="post" action="/billing/portal"' in html) == (access and status == 'cancelled')
 
 
 @pytest.mark.parametrize('plan,status', [('starter', 'active'), ('pro', 'expired'), ('pro', 'on_trial')])
@@ -79,3 +79,27 @@ def test_direct_dependencies_pinned_and_lexbor_works():
         name, pinned = line.split('==')
         assert version(name) == pinned
     assert LexborHTMLParser('<p>Lexbor works</p>').css_first('p').text() == 'Lexbor works'
+
+
+def test_cancelled_board_portal_form_posts_with_csrf(client, settings, monkeypatch):
+    signup(client)
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE businesses SET subscription_status='cancelled',"
+                   "subscription_ends_at='2099-01-01T00:00:00+00:00'")
+    calls = []
+    destination = 'https://store.lemonsqueezy.com/billing/stub'
+    def portal(config, user):
+        assert config is settings
+        calls.append(user['business_id'])
+        return destination
+    monkeypatch.setattr(billing, 'portal', portal)
+    document = LexborHTMLParser(client.get('/app').text)
+    form = document.css_first('form[action="/billing/portal"]')
+    assert form is not None and form.attributes['method'].lower() == 'post'
+    assert form.css_first('button').text() == 'Manage subscription'
+    csrf = form.css_first('input[name="csrf"]')
+    assert csrf is not None and csrf.attributes['type'] == 'hidden'
+    response = client.post(form.attributes['action'], data={'csrf': csrf.attributes['value']})
+    assert response.status_code == 303
+    assert response.headers['location'] == destination
+    assert calls == [business(settings)['id']]
