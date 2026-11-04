@@ -98,7 +98,7 @@ def test_dry_run_counts_do_not_open_or_write_sqlite(monkeypatch, capsys):
     assert importer.main([]) == 0
     output = capsys.readouterr()
     assert output.err == ''
-    assert output.out.splitlines() == ['businesses: 1', 'users: 1', 'suppressions: 1',
+    assert output.out.splitlines() == ['subscription_status → число бизнесов', 'active → 1', 'businesses: 1', 'users: 1', 'suppressions: 1',
                                        'people: 1', 'messages: 2']
     assert 'not-printed' not in output.out
 
@@ -135,3 +135,25 @@ def test_postgres_source_forces_read_only_without_real_postgres(monkeypatch):
     assert calls[0][2]['options'] == '-c default_transaction_read_only=on'
     assert ('SET TRANSACTION READ ONLY', ()) in calls
     assert calls[-2:] == [('ROLLBACK', ()), ('CLOSE', ())]
+
+
+def test_import_warns_before_write_and_preserves_unknown_status(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+    from scripts import import_from_railway as importer
+
+    target = tmp_path / 'target.sqlite3'
+    legacy = replace(bundle(), business=bundle().business | {'subscription_status': 'legacy_paid'})
+    monkeypatch.setattr(importer, '_required_environment', lambda: dict.fromkeys(
+        (*importer.SOURCE_ENV, 'CLIENT_ZERO_BUSINESS_ID'), 'synthetic'))
+    monkeypatch.setattr(importer, 'PostgresSource', lambda value: types.SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(importer, 'read_sources', lambda *args: legacy)
+    monkeypatch.setenv('DB_PATH', str(target))
+    def write(path, value):
+        output = capsys.readouterr()
+        assert 'legacy_paid → 1' in output.out
+        assert 'WARNING' in output.err and 'outside Lemon Squeezy' in output.err
+        apply_bundle(path, value)
+    monkeypatch.setattr(importer, 'apply_bundle', write)
+    assert importer.main(['--apply']) == 0
+    with connect(target) as db:
+        assert db.execute('SELECT subscription_status FROM businesses').fetchone()[0] == 'legacy_paid'

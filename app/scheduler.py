@@ -1,6 +1,6 @@
 """One in-process scheduler. SQLite runs is both history and the overlap guard."""
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -29,7 +29,14 @@ class Scheduler:
             db.execute('BEGIN IMMEDIATE')
             if db.execute("SELECT 1 FROM runs WHERE business_id IS ? AND kind=? AND status='running'", (business_id, kind)).fetchone():
                 return None
-            if since and db.execute('SELECT 1 FROM runs WHERE business_id IS ? AND kind=? AND started_at>=?', (business_id, kind, since)).fetchone():
+            if since and db.execute(
+                "SELECT 1 FROM runs WHERE business_id IS ? AND kind=? AND started_at>=?"
+                + (" AND status='ok' AND started_at<?" if kind == 'search' else ''),
+                (business_id, kind, since, (datetime.fromisoformat(since).astimezone(
+                    ZoneInfo(self.settings.get('TIMEZONE_OWNER', 'Asia/Ho_Chi_Minh')))
+                    + timedelta(days=1)).astimezone(timezone.utc).isoformat())
+                if kind == 'search' else (business_id, kind, since),
+            ).fetchone():
                 return None
             run_id = str(uuid4())
             db.execute("INSERT INTO runs(id,business_id,kind,started_at,status) VALUES (?,?,?,?,'running')", (run_id, business_id, kind, now()))
@@ -39,6 +46,13 @@ class Scheduler:
         context_token = current_run_id.set(run_id)
         try:
             if kind == 'search':
+                with connect(self.settings.db_path) as db:
+                    business = db.execute('SELECT * FROM businesses WHERE id=?', (business_id,)).fetchone()
+                    if not business or not billing.can_search(business):
+                        db.execute("INSERT INTO log(business_id,event,detail,created_at) VALUES (?,'search_skipped',?,?)",
+                                   (business_id, 'Lead search requires Pro with subscription access', now()))
+                        db.execute("UPDATE runs SET status='skipped',finished_at=? WHERE id=?", (now(), run_id))
+                        return
                 # Same owner-local day as the first-letter cap (TIMEZONE_OWNER), not a UTC day.
                 day = guards._owner_day_start(self.settings, datetime.now(timezone.utc))
                 with connect(self.settings.db_path) as db:
@@ -88,9 +102,9 @@ class Scheduler:
             if not billing.entitled(business, current) or business['outreach_paused']:
                 continue
             bid = business['id']
-            day = current.replace(hour=0, minute=0, second=0, microsecond=0)
+            day = guards._owner_day_start(self.settings, current)
             if current.hour >= 13 and billing.can_search(business, current):
-                self.dispatch(bid, 'search', day.isoformat())
+                self.dispatch(bid, 'search', day)
             for kind, interval in (('send', 15), ('poll', 5)):
                 # Scheduler opens a US-wide window; guards check each recipient immediately before SMTP.
                 if kind == 'send' and not any(allowed_hours(business, current, recipient_zone) for recipient_zone in US_ZONES):

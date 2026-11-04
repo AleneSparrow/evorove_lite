@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db import connect, migrate
+from app.billing import STATUSES
 
 
 SOURCE_ENV = (
@@ -345,6 +346,11 @@ def _required_environment():
 
 
 def _print_counts(bundle):
+    status = bundle.business["subscription_status"]
+    print("subscription_status → число бизнесов")
+    print(f"{status} → 1")
+    if status not in STATUSES:
+        print(f"WARNING: subscription_status {status!r} is outside Lemon Squeezy statuses; preserved unchanged", file=sys.stderr)
     for table, count in bundle.counts().items():
         print(f"{table}: {count}")
 
