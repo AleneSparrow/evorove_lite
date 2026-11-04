@@ -273,6 +273,31 @@ def test_validator_rejects_what_the_model_may_not_say():
         'Pay at https://evil.example', outreach.OFFER, '')[1]
 
 
+@pytest.mark.parametrize('text', [
+    'Pay at HTTPS://evil.example', 'Pay at Http://evil.example', 'See WWW.evil.example',
+])
+def test_the_link_guard_is_not_fooled_by_capitalisation(text):
+    assert 'link_or_contact_detail' in outreach.validate(text, outreach.OFFER, '')[1]
+
+
+@pytest.mark.parametrize('text', [
+    'Call acme-clinic.com for details.', 'Go to bit.ly/abc123 now.', 'See example.org/pricing today.',
+    'Click <a href="https://evil.example">here</a> to pay.',
+])
+def test_a_schemeless_domain_or_html_link_is_still_a_link(text):
+    assert 'link_or_contact_detail' in outreach.validate(text, outreach.OFFER, '')[1]
+
+
+@pytest.mark.parametrize('text', [
+    'Is that worth a quick look on your side?',
+    'We serve clinics, e.g. dental and vision practices.',
+    'Reach out any time -- our team is based in the U.S. and ready to help.',
+    'Thanks for the detail. I think this is close to what we do.',
+])
+def test_ordinary_prose_with_sentence_ending_periods_is_not_a_link(text):
+    assert outreach.validate(text, outreach.OFFER, '') == (True, [])
+
+
 def test_untrusted_analysis_is_coerced_not_trusted():
     coerced = outreach.analysis_from({'problem': ['nope'], 'ready': 'yes', 'hostile': 1, 'extra': 'ignored'})
     assert coerced['ready'] is False and coerced['hostile'] is False
@@ -294,7 +319,7 @@ def test_a_reply_continues_the_same_person_and_is_answered_once(settings):
 
     llm = stub_llm(analysis={'problem': 'late callbacks'})
     assert outreach.poll_replies('biz-1', settings=settings, send=smtp,
-                                 fetch=fake_imap([reply]), llm=llm) == 1
+                                 fetch=fake_imap([reply]), llm=llm, now_utc=DAYTIME) == 1
     assert len(people(settings)) == 1  # no duplicate person
     stored = messages(settings, person['id'])
     assert [row['direction'] for row in stored] == ['out', 'in', 'out']
@@ -306,7 +331,7 @@ def test_a_reply_continues_the_same_person_and_is_answered_once(settings):
 
     # The same IMAP message arriving twice is stored and answered once.
     assert outreach.poll_replies('biz-1', settings=settings, send=smtp,
-                                 fetch=fake_imap([reply]), llm=llm) == 0
+                                 fetch=fake_imap([reply]), llm=llm, now_utc=DAYTIME) == 0
     assert len(messages(settings, person['id'])) == 3
 
 
@@ -316,7 +341,7 @@ def test_a_reply_is_matched_by_sender_when_threading_headers_are_missing(setting
     smtp = FakeSmtp()
     outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
     outreach.poll_replies('biz-1', settings=settings, send=smtp,
-                          fetch=fake_imap([inbound('Tell me more.')]), llm=stub_llm())
+                          fetch=fake_imap([inbound('Tell me more.')]), llm=stub_llm(), now_utc=DAYTIME)
     assert len(people(settings)) == 1
     assert [row['direction'] for row in messages(settings, person['id'])] == ['out', 'in', 'out']
 
@@ -409,7 +434,7 @@ def test_the_offer_hands_over_the_owners_words_and_link(settings):
     llm = stub_llm(analysis={'problem': 'late callbacks', 'desired_outcome': 'same-day callbacks', 'ready': True},
                    body='Here is what I can put in front of you.')
     outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound('Send me the details.')]),
-                          llm=llm)
+                          llm=llm, now_utc=DAYTIME)
 
     letter = smtp.bodies[-1]
     assert 'Two boards and a weekly review.' in letter
@@ -430,12 +455,12 @@ def test_a_second_ready_reply_never_repeats_the_offer_link(settings):
     ready = {'problem': 'late callbacks', 'desired_outcome': 'same-day callbacks', 'ready': True}
     llm = stub_llm(analysis=ready, body='Here is what I can put in front of you.')
     outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
-        [inbound('Send me the details.', uid=11)], uidvalidity=1), llm=llm)
+        [inbound('Send me the details.', uid=11)], uidvalidity=1), llm=llm, now_utc=DAYTIME)
     assert messages(settings, person['id'])[-1]['move'] == outreach.OFFER
 
     # They say "ready" again -- no second link, and the move is never OFFER again.
     outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
-        [inbound('Sounds great, I am ready to go.', uid=12)], uidvalidity=1), llm=llm)
+        [inbound('Sounds great, I am ready to go.', uid=12)], uidvalidity=1), llm=llm, now_utc=DAYTIME)
     stored = messages(settings, person['id'])
     assert [row['move'] for row in stored if row['direction'] == 'out'].count(outreach.OFFER) == 1
     assert 'pay.example.com' not in smtp.bodies[-1]
@@ -454,13 +479,13 @@ def test_an_objection_after_the_offer_is_still_answered(settings):
     ready = {'problem': 'late callbacks', 'desired_outcome': 'same-day callbacks', 'ready': True}
     outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
         [inbound('Send me the details.', uid=11)], uidvalidity=1),
-        llm=stub_llm(analysis=ready, body='Here is what I can put in front of you.'))
+        llm=stub_llm(analysis=ready, body='Here is what I can put in front of you.'), now_utc=DAYTIME)
     assert messages(settings, person['id'])[-1]['move'] == outreach.OFFER
 
     objecting = {'objection': 'too expensive', 'objection_cause': 'affordability'}
     outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
         [inbound('That is more than I expected to pay.', uid=12)], uidvalidity=1),
-        llm=stub_llm(analysis=objecting))
+        llm=stub_llm(analysis=objecting), now_utc=DAYTIME)
     stored = messages(settings, person['id'])
     assert stored[-1]['move'] == outreach.ANSWER_OBJECTION
     assert [row['move'] for row in stored].count(outreach.OFFER) == 1
@@ -472,7 +497,7 @@ def test_a_model_that_invents_a_claim_is_replaced_by_the_safe_wording(settings):
     smtp = FakeSmtp()
     outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
     outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound('Tell me more.')]),
-                          llm=stub_llm(body='We guarantee 40% fewer missed calls, free for a month.'))
+                          llm=stub_llm(body='We guarantee 40% fewer missed calls, free for a month.'), now_utc=DAYTIME)
     letter = smtp.bodies[-1]
     assert 'guarantee' not in letter and '40%' not in letter
     assert outreach.SAFE_FALLBACK[outreach.ASK_DISCOVERY] in letter
@@ -484,7 +509,7 @@ def test_an_unavailable_model_still_answers_safely(settings):
     smtp = FakeSmtp()
     outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
     assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound('Tell me more.')]),
-                                 llm=stub_llm(error=RuntimeError('LLM is not installed'))) == 1
+                                 llm=stub_llm(error=RuntimeError('LLM is not installed')), now_utc=DAYTIME) == 1
     assert outreach.SAFE_FALLBACK[outreach.ASK_DISCOVERY] in smtp.bodies[-1]
 
 
@@ -495,7 +520,7 @@ def test_a_question_for_a_human_gets_the_servers_own_wording(settings):
     outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
     llm = stub_llm(analysis={'requires_human': True}, body='Sure, I will sign your DPA right now.')
     outreach.poll_replies('biz-1', settings=settings, send=smtp,
-                          fetch=fake_imap([inbound('Send me your signed DPA.')]), llm=llm)
+                          fetch=fake_imap([inbound('Send me your signed DPA.')]), llm=llm, now_utc=DAYTIME)
     assert outreach.SAFE_FALLBACK[outreach.HANDOFF] in smtp.bodies[-1]
     assert 'sign your DPA' not in smtp.bodies[-1]
     assert llm.calls == ['sales_analysis']  # a handoff is never phrased by the model
@@ -632,7 +657,7 @@ def test_record_payment_is_the_only_way_to_done(settings):
                    " VALUES (?,?,'out','s','b','confirm_need','2026-11-03T12:00:00+00:00')",
                    (str(uuid4()), person['id']))
     outreach.poll_replies('biz-1', settings=settings, send=smtp,
-                          fetch=fake_imap([inbound('Send me the link.')]), llm=llm)
+                          fetch=fake_imap([inbound('Send me the link.')]), llm=llm, now_utc=DAYTIME)
     # The offer went out and the link was handed over: that alone is not a payment.
     assert people(settings)[0]['stage'] == 'offer_made'
 
@@ -690,7 +715,7 @@ def test_the_offer_uses_billings_real_payment_link_for(settings):
                    (str(uuid4()), person['id']))
     llm = stub_llm(analysis={'problem': 'p', 'desired_outcome': 'o', 'ready': True})
     outreach.poll_replies('biz-1', settings=settings, send=smtp,
-                          fetch=fake_imap([inbound('Send me the link.')]), llm=llm)
+                          fetch=fake_imap([inbound('Send me the link.')]), llm=llm, now_utc=DAYTIME)
     letter = smtp.bodies[-1]
     # billing.payment_link_for carries custom_data so the webhook can close this exact card.
     assert billing.payment_link_for({'payment_link': 'https://pay.example.com/acme', 'id': 'biz-1'},
@@ -793,7 +818,7 @@ def test_a_mailbox_rebuild_rereads_without_duplicating_the_reply(settings):
     first = smtp.sent[0]['Message-ID']
     reply = inbound('Tell me more.', in_reply_to=first, uid=50)
     assert outreach.poll_replies('biz-1', settings=settings, send=smtp,
-                                 fetch=fake_imap([reply], uidvalidity=100), llm=stub_llm()) == 1
+                                 fetch=fake_imap([reply], uidvalidity=100), llm=stub_llm(), now_utc=DAYTIME) == 1
     assert len(smtp.sent) == 2  # first letter + one reply
 
     # UIDVALIDITY changed: the provider hands back the SAME message under a
@@ -801,7 +826,7 @@ def test_a_mailbox_rebuild_rereads_without_duplicating_the_reply(settings):
     reread = inbound('Tell me more.', in_reply_to=first, uid=9)
     reread['message_id'] = reply['message_id']
     assert outreach.poll_replies('biz-1', settings=settings, send=smtp,
-                                 fetch=fake_imap([reread], uidvalidity=200), llm=stub_llm()) == 0
+                                 fetch=fake_imap([reread], uidvalidity=200), llm=stub_llm(), now_utc=DAYTIME) == 0
     assert len(smtp.sent) == 2  # no duplicate reply
     with connect(settings.db_path) as db:
         row = db.execute('SELECT imap_last_uid,imap_uidvalidity FROM businesses WHERE id=?', ('biz-1',)).fetchone()

@@ -47,7 +47,15 @@ SENSITIVE_CLAIM = re.compile(
     r'(?:[$€£]\s?\d[\d,.]*|\b\d{1,3}\s*%|\b(?:discount|guarantee|guaranteed|'
     r'free (?:trial|consultation|service|visit|estimate|upgrade)|for free|no cost|'
     r'limited time|only \d+ (?:spots?|slots?) left)\b)', re.IGNORECASE)
-URL_OR_CONTACT = re.compile(r'https?://|www\.|\S+@\S+\.\S+|\+?\d[\d ()\-]{8,}\d')
+# A domain with no scheme (acme-clinic.com, bit.ly/abc123) is still a link, so
+# it is matched directly: a letter/digit run, a dot, a 2+ letter TLD, with no
+# space around the dot -- the one thing that is never true of a sentence's own
+# closing full stop (always followed by whitespace or the end of the text) or
+# an abbreviation like "e.g." (never 2+ letters after the dot).
+URL_OR_CONTACT = re.compile(
+    r'https?://|www\.|<[a-z][^>]*>|'
+    r'\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z]{2,24}(?:/\S*)?\b|'
+    r'\S+@\S+\.\S+|\+?\d[\d ()\-]{8,}\d', re.IGNORECASE)
 
 # Words that mark a "name" as a company, department or role label rather than
 # a person -- the search agent sometimes hands over a business name or a team
