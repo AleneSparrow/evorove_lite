@@ -101,10 +101,26 @@ def test_landing_desktop_and_mobile_screenshots(page, live_app):
         page.set_viewport_size(viewport)
         page.goto(base + '/')
         expect(page).to_have_title('Evorove — Find. Close. Next.')
-        expect(page.locator('.hero h1')).to_have_text('FIND.CLOSE.NEXT.')
+        expect(page.locator('.ev-hero-h1')).to_have_text('FIND.CLOSE.NEXT.')
         expect(page.locator('.brand span')).to_have_text('Find · close · next')
-        expect(page.get_by_role('link',name='Choose Starter ↗',exact=True)).to_be_visible()
-        expect(page.get_by_role('link',name='Choose Pro ↗',exact=True)).to_be_visible()
+        expect(page.get_by_role('link',name='Choose Starter',exact=True)).to_be_visible()
+        expect(page.get_by_role('link',name='Choose Pro',exact=True)).to_be_visible()
         assert page.locator('body').evaluate('(body) => body.scrollWidth <= window.innerWidth')
+        page.evaluate('() => document.fonts.ready')
         page.screenshot(path=str(output / f'landing-{label}.png'), full_page=True)
         page.screenshot(path=str(output / f'landing-{label}-hero.png'), full_page=False)
+
+
+def test_board_desktop_and_mobile_screenshots(page, live_app):
+    from pathlib import Path
+    base, _, _ = live_app
+    register(page, base)
+    output = Path(__file__).resolve().parents[2] / 'docs/screenshots'
+    output.mkdir(parents=True, exist_ok=True)
+    for label, viewport in [('desktop', {'width':1440,'height':1000}), ('mobile', {'width':390,'height':844})]:
+        page.set_viewport_size(viewport)
+        page.goto(base + '/app')
+        expect(page.get_by_role('heading', name='Browser acceptance', exact=True)).to_be_visible()
+        page.evaluate('() => document.fonts.ready')
+        assert page.evaluate('() => document.documentElement.scrollWidth === window.innerWidth')
+        page.screenshot(path=str(output / f'board-{label}.png'), full_page=True)

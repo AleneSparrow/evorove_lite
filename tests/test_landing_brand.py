@@ -7,17 +7,24 @@ from test_core import client, settings
 
 def test_landing_brand_and_steps(client):
     html = client.get('/').text
+    css = Path('app/static/style.css').read_text()
     assert '<title>Evorove — Find. Close. Next.</title>' in html
-    assert '<h1>FIND.<br>CLOSE.<br>NEXT.</h1>' in html
+    assert '<h1 class="ev-hero-h1">FIND.<br>CLOSE.<br>NEXT.</h1>' in html
     assert '<span>Find · close · next</span>' in html
     assert 'An AI sales agent that writes the first email, handles the replies and sends your payment link. Every deal moves on one board.' in html
-    for label, text in [
-        ('01 FIND', 'Bring your contacts and the reason to write. On Pro, Evorove also finds US companies with visible pain and keeps the evidence on the card.'),
-        ('02 CLOSE', 'Evorove writes the first email, answers replies, works objections and sends your approved offer and payment link. A confirmed payment moves the deal to Done.'),
-        ('03 NEXT', 'The board keeps moving. Every conversation, every stage, in one place.'),
+    for heading, text in [
+        ('Find.', 'Bring your contacts and the reason to write. On Pro, Evorove also finds US companies with visible pain and keeps the evidence on the card.'),
+        ('Close.', 'Evorove writes the first email, answers replies, works objections and sends your approved offer and payment link. A confirmed payment moves the deal to Done.'),
+        ('Next.', 'The board keeps moving. Every conversation, every stage, in one place.'),
     ]:
-        assert f'<span>{label}</span><p>{text}</p>' in html
-    assert "Client 0 is Evorove itself — we sell our own subscription through the same board, same rules, before anyone else's." in html
+        assert f'<h3>{heading}</h3><p>{text}</p>' in html
+    assert 'Client 0 is <span>Evorove</span> itself.' in html
+    assert "same board, same rules, before anyone else's." in html
+    assert '/static/teaser-540.mp4' in html
+    assert 'fonts.googleapis.com' not in html and 'fonts.gstatic.com' not in css
+    assert '/static/fonts/barlow-condensed-700.woff2' in css
+    assert '/static/fonts/inter-600.woff2' in css
+    assert 'prefers-reduced-motion' in css
 
 
 def test_public_templates_without_trials_or_lead_counts(client):

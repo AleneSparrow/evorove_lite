@@ -1,4 +1,4 @@
-{% extends 'base.html' %}{% block title %}Search preview · Evorove{% endblock %}{% block content %}
+{% extends 'base.html' %}{% block header %}{% include 'app_header.html' %}{% endblock %}{% block title %}Search preview · Evorove{% endblock %}{% block content %}
 <div class="page-heading"><div><p class="eyebrow">Dry run</p><h1>Search preview</h1><p>Review up to 20 candidates before the live search. Previewing never adds people or sends messages.</p></div><a class="button secondary" href="/app">Back to board</a></div>
 <form method="post" action="/app/search-preview" hx-post="/app/search-preview" hx-target="#preview-results" hx-swap="outerHTML"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" {% if preview and preview.status == 'running' %}disabled{% endif %}>Preview 20 people</button></form>
 {% include 'search_preview_results.html' %}
