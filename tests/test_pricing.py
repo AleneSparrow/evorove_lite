@@ -252,7 +252,9 @@ def test_pro_search_limit_counts_the_owner_local_day_not_the_utc_day(client, set
     assert calls == [20]
 
 
-def test_pro_card_and_faq_promise_twenty_verified_leads_a_day(client):
+def test_pro_card_and_faq_describe_search_without_volume_promises(client):
     landing, faq = client.get('/').text, client.get('/faq').text
-    assert 'Up to 20 verified new leads a day' in landing and 'around 20' not in landing
-    assert 'up to 20 verified new leads a day' in faq and 'around 20' not in faq
+    assert 'Daily lead search across US companies' in landing
+    assert '20 verified new leads' not in landing
+    assert 'adds lead search for US companies with visible pain.' in faq
+    assert '20 verified new leads' not in faq
