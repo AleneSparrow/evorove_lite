@@ -19,14 +19,15 @@ if [ ! -r /etc/os-release ]; then
     exit 1
 fi
 
+# shellcheck source=/dev/null
 . /etc/os-release
 if [ "${ID:-}" != "ubuntu" ] || [ "${VERSION_ID:-}" != "24.04" ]; then
     echo "Ubuntu 24.04 is required" >&2
     exit 1
 fi
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SOURCE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+SOURCE_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 if [ "$SOURCE_ROOT" != "$APP_ROOT" ]; then
     echo "Clone or copy the repository to $APP_ROOT before running setup.sh" >&2
     exit 1

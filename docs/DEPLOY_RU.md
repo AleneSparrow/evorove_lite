@@ -27,9 +27,8 @@
 ```bash
 sudo apt-get update
 sudo apt-get install -y git ca-certificates
-sudo git clone YOUR_REPOSITORY_URL /opt/evorove
+sudo git clone --branch main YOUR_REPOSITORY_URL /opt/evorove
 cd /opt/evorove
-sudo git switch feat/deploy
 sudo SSH_PORT=22 ./deploy/setup.sh
 ```
 
@@ -207,3 +206,72 @@ free -h
 Ожидается только один uvicorn worker, слушающий `127.0.0.1:8000`. Если процесс
 превысит лимит памяти 300 МБ, systemd завершит его, а политика `Restart=on-failure`
 запустит его снова.
+
+## 10. Чек-лист для Алёны: что вводить и куда (коротко)
+
+**Секреты — только имена переменных, значения берутся из своих источников
+(Cloudflare, Lemon Squeezy, Anthropic, Telegram), не из этого файла:**
+
+- `/opt/evorove/.env` (создаётся `setup.sh` из `.env.example`, редактировать
+  через `sudoedit`, раздел 3): `APP_BASE_URL`, `SECRET_KEY`, `DB_PATH` —
+  обязательны для запуска; далее `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`,
+  `DAILY_TOKEN_BUDGET`, `PER_RUN_TOKEN_BUDGET`, `LEMONSQUEEZY_API_KEY`,
+  `LEMONSQUEEZY_WEBHOOK_SECRET`, `LEMONSQUEEZY_STORE_ID`,
+  `LEMONSQUEEZY_VARIANT_STARTER`, `LEMONSQUEEZY_VARIANT_PRO`,
+  `BILLING_TEST_MODE_ALLOWED_EMAILS`, `SYSTEM_SMTP_HOST`, `SYSTEM_SMTP_PORT`,
+  `SYSTEM_SMTP_USER`, `SYSTEM_SMTP_PASSWORD`, `SYSTEM_SMTP_FROM`,
+  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CLIENT_ZERO_BUSINESS_ID`,
+  `TIMEZONE_OWNER`, `MARKET_SIGNALS` (полный и актуальный список всегда в
+  `.env.example`; что каждая означает — в `docs/CONTRACT.md`).
+- `/etc/evorove/litestream.env` (раздел 5): `LITESTREAM_R2_BUCKET`,
+  `LITESTREAM_R2_ENDPOINT`, `LITESTREAM_R2_ACCESS_KEY_ID`,
+  `LITESTREAM_R2_SECRET_ACCESS_KEY`.
+- `/etc/cloudflared/evorove.token` (раздел 4): не переменная, а файл из одной
+  строки — tunnel token целиком.
+
+**Команда запуска** (после того, как все файлы выше заполнены и
+`deploy/setup.sh` уже выполнен без ошибок — раздел 2 и 6):
+
+```bash
+sudo systemctl start evorove
+sudo systemctl start litestream
+sudo systemctl start cloudflared
+```
+
+**Проверка `/health`** (должно вернуть успешный ответ до и после каждого
+перезапуска):
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:8000/health
+```
+
+**Бэкап в R2 и логи:**
+
+```bash
+# Litestream реально пишет в R2 (раздел 5):
+sudo systemd-run --wait --pipe --collect --property=User=evorove \
+  --property=Group=evorove --property=EnvironmentFile=/etc/evorove/litestream.env \
+  /usr/bin/litestream databases -config /etc/litestream.yml
+
+# Последние логи всех трёх сервисов (раздел 9):
+sudo journalctl -u evorove -u litestream -u cloudflared -n 100 --no-pager
+```
+
+**Как откатиться**, если новый деплой сломан:
+
+```bash
+# 1. Откат кода на предыдущий коммит/тег:
+sudo systemctl stop evorove
+sudo -u evorove git -C /opt/evorove checkout <предыдущий-коммит-или-тег>
+sudo -u evorove /opt/evorove/.venv/bin/pip install \
+  --requirement /opt/evorove/requirements.txt
+sudo systemctl start evorove
+curl --fail --silent --show-error http://127.0.0.1:8000/health
+
+# 2. Если дело не в коде, а в самой базе — восстановить её из R2 (раздел 8),
+#    это отдельная операция и требует останова evorove и litestream.
+```
+
+Если `/health` не отвечает и после откат кода не помог, не трогайте базу —
+соберите `journalctl` (команда выше) и восстановление из R2 делайте только по
+инструкции в разделе 8, с резервной копией старых файлов.
