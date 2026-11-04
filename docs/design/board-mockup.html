@@ -1,0 +1,89 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Evorove board mockup (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#070604}
+a{color:#f3ead7}a:hover{color:#ff4d1a}
+.ev-dot{display:inline-block;border-radius:999px;background:#ff4d1a;box-shadow:0 0 18px rgba(255,77,26,.55);animation:ev-beat 1.15s cubic-bezier(.3,0,.2,1) infinite}
+@keyframes ev-beat{0%{transform:scale(1)}17%{transform:scale(1.45);box-shadow:0 0 42px rgba(255,77,26,.9)}32%{transform:scale(1)}46%{transform:scale(1.25)}60%,100%{transform:scale(1)}}
+.ev-btn-primary{background:#ff4d1a;color:#070604;text-decoration:none}
+.ev-btn-primary:hover{background:#e04417;color:#070604}
+.ev-btn-ghost{color:#f3ead7;text-decoration:none;border:1px solid #282622}
+.ev-btn-ghost:hover{border-color:#958f83;color:#f3ead7}
+@media (prefers-reduced-motion:reduce){.ev-dot{animation:none}}
+</style>
+</head><body>
+<div style="width: 1440px; height: 900px; box-sizing: border-box; background: #070604; color: #f3ead7; font-family: Inter, system-ui, -apple-system, sans-serif; font-size: 14px; line-height: 20px; display: flex; flex-direction: column">
+
+<header style="height: 72px; box-sizing: border-box; padding: 0 32px; border-bottom: 1px solid #282622; display: flex; align-items: center; justify-content: space-between">
+<div style="display: flex; align-items: center; gap: 12px">
+<span class="ev-dot" style="width: 10px; height: 10px" aria-hidden="true"></span>
+<span style="font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: 22px; letter-spacing: 0.18em">EVOROVE</span>
+</div>
+<nav aria-label="App" style="display: flex; gap: 28px; font-weight: 500">
+<a href="#board" style="text-decoration: none; color: #f3ead7">Board</a>
+<a href="#contacts" style="text-decoration: none; color: #958f83">Contacts</a>
+<a href="#metrics" style="text-decoration: none; color: #958f83">Metrics</a>
+<a href="#settings" style="text-decoration: none; color: #958f83">Settings</a>
+</nav>
+<p style="margin: 0; display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83"><span style="width: 6px; height: 6px; border-radius: 999px; background: #ff4d1a"></span>OUTREACH ACTIVE · PRO</p>
+</header>
+
+<div style="padding: 24px 32px 0; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px">
+<div style="display: flex; flex-direction: column; gap: 8px">
+<p style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">YOUR SALES BOARD</p>
+<h1 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: 44px; line-height: 1">[BUSINESS NAME]</h1>
+</div>
+<div style="display: flex; gap: 10px">
+<a class="ev-btn-ghost" href="#contacts" style="padding: 11px 18px; border-radius: 6px; font-weight: 600">Add contacts</a>
+<a class="ev-btn-ghost" href="#preview" style="padding: 11px 18px; border-radius: 6px; font-weight: 600">Search preview</a>
+<button type="button" class="ev-btn-primary" style="padding: 11px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; border: 0; font-family: inherit; cursor: pointer">Find people</button>
+</div>
+</div>
+
+<div style="flex: 1; min-height: 0; padding: 24px 32px 32px; display: flex; gap: 24px">
+<div style="flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px">
+
+<section aria-label="Cold" style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">COLD <span>3</span></h2>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Pain: [quote from a public source]</span></div>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Your note: [reason to write]</span></div>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Pain: [quote from a public source]</span></div>
+</section>
+
+<section aria-label="In progress" style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">IN PROGRESS <span>2</span></h2>
+<div style="background: #181613; border: 1px solid #ff4d1a; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Replied · objection: timing</span></div>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">First email sent</span></div>
+</section>
+
+<section aria-label="Offer made" style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">OFFER MADE <span>1</span></h2>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Payment link sent</span></div>
+</section>
+
+<section aria-label="Done" style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">DONE <span>1</span></h2>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 8px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="align-self: flex-start; padding: 4px 10px; border-radius: 999px; background: #ff4d1a; color: #070604; font-size: 12px; font-weight: 600; box-shadow: 0 0 18px rgba(255,77,26,.55)">Paid · [AMOUNT]</span></div>
+</section>
+</div>
+
+<aside aria-label="Person details" style="width: 360px; flex-shrink: 0; background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 24px; display: flex; flex-direction: column; gap: 18px">
+<p style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">THE CONVERSATION</p>
+<h2 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: 32px; line-height: 1">[NAME] · [COMPANY]</h2>
+<div style="background: #181613; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px">
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">EVIDENCE</span>
+<span>“[Quote from a public source]”</span>
+<a href="#source" style="font-size: 13px; color: #958f83">Source link</a>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px">
+<div style="background: #181613; border-radius: 6px; padding: 12px 14px; color: #958f83; font-size: 13px">Evorove · first email · [date]</div>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 12px 14px; font-size: 13px">Reply · [date]</div>
+<div style="background: #181613; border-radius: 6px; padding: 12px 14px; color: #958f83; font-size: 13px">Evorove · answer to objection · [date]</div>
+</div>
+<p style="margin: auto 0 0; font-size: 13px; color: #958f83">Next move: confirm the need, then the offer.</p>
+</aside>
+</div>
+</div>
+</body></html>

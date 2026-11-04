@@ -1,0 +1,333 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Evorove landing mockup (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#070604}
+a{color:#f3ead7}a:hover{color:#ff4d1a}
+.ev-dot{position:relative;display:inline-block;border-radius:999px;background:#ff4d1a;box-shadow:0 0 18px rgba(255,77,26,.55);animation:ev-beat 1.15s cubic-bezier(.3,0,.2,1) infinite}
+@keyframes ev-beat{0%{transform:scale(1);box-shadow:0 0 18px rgba(255,77,26,.55)}17%{transform:scale(1.45);box-shadow:0 0 42px rgba(255,77,26,.9)}32%{transform:scale(1);box-shadow:0 0 18px rgba(255,77,26,.55)}46%{transform:scale(1.25);box-shadow:0 0 30px rgba(255,77,26,.75)}60%,100%{transform:scale(1);box-shadow:0 0 18px rgba(255,77,26,.55)}}
+.ev-ring{position:absolute;left:50%;top:50%;width:24px;height:24px;margin:-12px 0 0 -12px;border-radius:999px;border:1px solid rgba(255,77,26,.7);animation:ev-ring 3.45s cubic-bezier(.2,.6,.3,1) infinite;pointer-events:none}
+.ev-ring.r2{animation-delay:1.15s}.ev-ring.r3{animation-delay:2.3s}
+@keyframes ev-ring{0%{transform:scale(1);opacity:.9}100%{transform:scale(20);opacity:0}}
+.ev-sweep{position:absolute;inset:0;border-radius:999px;background:conic-gradient(from 0deg,rgba(255,77,26,.22),rgba(255,77,26,0) 70deg,rgba(255,77,26,0) 360deg);animation:ev-spin 6s linear infinite}
+@keyframes ev-spin{to{transform:rotate(360deg)}}
+.ev-blip{animation:ev-blip 6s linear infinite}
+@keyframes ev-blip{0%,100%{opacity:.35}8%{opacity:1}40%{opacity:.35}}
+.ev-btn-primary{background:#ff4d1a;color:#070604;text-decoration:none}
+.ev-btn-primary:hover{background:#e04417;color:#070604}
+.ev-btn-ghost{color:#f3ead7;text-decoration:none;border:1px solid #282622}
+.ev-btn-ghost:hover{border-color:#958f83;color:#f3ead7}
+details summary{cursor:pointer;list-style:none}
+details summary::-webkit-details-marker{display:none}
+.ev-board-scale{zoom:.8222}
+@media (max-width:1280px){.ev-board-scale{zoom:.6}}
+@media (max-width:900px){.ev-board-scale{zoom:.42}}
+@media (max-width:600px){.ev-board-scale{zoom:.24}.ev-hero-h1{font-size:clamp(84px, 26vw, 140px) !important}}
+@media (max-width:720px){.ev-nav-link{display:none !important}.ev-blip span:last-child{font-size:9px;letter-spacing:.12em}}
+@media (prefers-reduced-motion:reduce){.ev-dot,.ev-ring,.ev-sweep,.ev-blip{animation:none}}
+</style>
+<style>
+body{margin:0;background:#070604}
+a{color:#f3ead7}a:hover{color:#ff4d1a}
+.ev-dot{display:inline-block;border-radius:999px;background:#ff4d1a;box-shadow:0 0 18px rgba(255,77,26,.55);animation:ev-beat 1.15s cubic-bezier(.3,0,.2,1) infinite}
+@keyframes ev-beat{0%{transform:scale(1)}17%{transform:scale(1.45);box-shadow:0 0 42px rgba(255,77,26,.9)}32%{transform:scale(1)}46%{transform:scale(1.25)}60%,100%{transform:scale(1)}}
+.ev-btn-primary{background:#ff4d1a;color:#070604;text-decoration:none}
+.ev-btn-primary:hover{background:#e04417;color:#070604}
+.ev-btn-ghost{color:#f3ead7;text-decoration:none;border:1px solid #282622}
+.ev-btn-ghost:hover{border-color:#958f83;color:#f3ead7}
+@media (prefers-reduced-motion:reduce){.ev-dot{animation:none}}
+</style></head><body>
+<div style="min-height: 100vh; background: #070604; color: #f3ead7; font-family: Inter, system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 23px; overflow: hidden">
+
+<header style="max-width: 1280px; margin: 0 auto; padding: 28px clamp(20px, 5vw, 48px); display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between">
+<a href="#top" style="display: flex; align-items: center; gap: 14px; text-decoration: none">
+<span class="ev-dot" style="width: 12px; height: 12px" aria-hidden="true"></span>
+<span style="display: flex; flex-direction: column; gap: 4px">
+<span style="font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: 26px; line-height: 1; letter-spacing: 0.18em; color: #f3ead7">EVOROVE</span>
+<span style="font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 500; font-size: 11px; line-height: 1; letter-spacing: 0.4em; color: #958f83">FIND · CLOSE · NEXT</span>
+</span>
+</a>
+<nav aria-label="Main" style="display: flex; flex-wrap: wrap; gap: 28px; align-items: center; font-size: 14px; font-weight: 500">
+<a href="#how" class="ev-nav-link" style="display: inline-block; padding: 12px 0; text-decoration: none; color: #958f83">How it works</a>
+<a href="#pricing" class="ev-nav-link" style="display: inline-block; padding: 12px 0; text-decoration: none; color: #958f83">Pricing</a>
+<a href="#faq" class="ev-nav-link" style="display: inline-block; padding: 12px 0; text-decoration: none; color: #958f83">FAQ</a>
+<a href="#login" style="display: inline-block; padding: 12px 0; text-decoration: none; color: #f3ead7">Log in</a>
+<a class="ev-btn-primary" href="#pricing" style="padding: 10px 18px; border-radius: 6px; font-weight: 600; font-size: 14px">Choose your plan</a>
+</nav>
+</header>
+
+<section id="top" style="max-width: 1280px; margin: 0 auto; padding: 56px clamp(20px, 5vw, 48px) 96px; display: flex; flex-wrap: wrap; gap: 48px; align-items: center">
+<div style="flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 28px">
+<p style="margin: 0; display: flex; align-items: center; gap: 10px; font-size: 11px; line-height: 14px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">REAL PAIN · A REAL CONVERSATION</p>
+<h1 class="ev-hero-h1" style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: clamp(84px, 13vw, 168px); line-height: 0.86; letter-spacing: 0.01em; color: #f3ead7">FIND.<br>CLOSE.<br>NEXT.</h1>
+<p style="margin: 0; max-width: 520px; font-size: 19px; line-height: 29px; color: #f3ead7">An AI sales agent that writes the first email, handles the replies and sends your payment link. Every deal moves on one board.</p>
+<div style="display: flex; flex-wrap: wrap; gap: 12px">
+<a class="ev-btn-primary" href="#pricing" style="padding: 14px 24px; border-radius: 6px; font-weight: 600; font-size: 15px">Choose your plan</a>
+<a class="ev-btn-ghost" href="#how" style="padding: 14px 24px; border-radius: 6px; font-weight: 600; font-size: 15px">See how it works</a>
+</div>
+<p style="margin: 0; font-size: 13px; line-height: 19px; color: #958f83">Your contacts on Starter. US lead search on Pro. Cancel anytime.</p>
+</div>
+
+<div style="flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 20px">
+<div role="img" aria-label="A radar finding leads, with the Evorove signal dot at the center" style="position: relative; width: 520px; max-width: 100%; aspect-ratio: 1 / 1; border-radius: 999px; background: #0f0e0c; border: 1px solid #282622; overflow: hidden">
+<div style="position: absolute; inset: 16%; border-radius: 999px; border: 1px solid #282622"></div>
+<div style="position: absolute; inset: 32%; border-radius: 999px; border: 1px solid #282622"></div>
+<div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #282622"></div>
+<div style="position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: #282622"></div>
+<div class="ev-sweep" aria-hidden="true"></div>
+<span class="ev-ring" aria-hidden="true"></span>
+<span class="ev-ring r2" aria-hidden="true"></span>
+<span class="ev-ring r3" aria-hidden="true"></span>
+<span class="ev-dot" aria-hidden="true" style="position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px"></span>
+
+<div class="ev-blip" style="position: absolute; left: 66%; top: 20%; display: flex; align-items: center; gap: 8px">
+<span style="width: 8px; height: 8px; border-radius: 999px; background: #f3ead7"></span>
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #f3ead7">COLD</span>
+</div>
+<div class="ev-blip" style="position: absolute; left: 58%; top: 64%; display: flex; align-items: center; gap: 8px; animation-delay: 1.5s">
+<span style="width: 8px; height: 8px; border-radius: 999px; background: #f3ead7"></span>
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #f3ead7">IN PROGRESS</span>
+</div>
+<div class="ev-blip" style="position: absolute; left: 18%; top: 72%; display: flex; align-items: center; gap: 8px; animation-delay: 3s">
+<span style="width: 8px; height: 8px; border-radius: 999px; background: #f3ead7"></span>
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #f3ead7">OFFER MADE</span>
+</div>
+<div class="ev-blip" style="position: absolute; left: 14%; top: 26%; display: flex; align-items: center; gap: 8px; animation-delay: 4.5s">
+<span style="width: 8px; height: 8px; border-radius: 999px; background: #ff4d1a"></span>
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">DONE</span>
+</div>
+</div>
+<p style="margin: 0; max-width: 520px; font-size: 11px; line-height: 18px; font-weight: 600; letter-spacing: 0.18em; color: #958f83; text-align: center">PUBLIC SIGNALS ONLY · EVERY LEAD COMES WITH ITS SOURCE</p>
+</div>
+</section>
+
+<section aria-label="Client zero" style="border-top: 1px solid #282622; border-bottom: 1px solid #282622; background: #0f0e0c">
+<div style="max-width: 1280px; margin: 0 auto; padding: 28px clamp(20px, 5vw, 48px); display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between">
+<p style="margin: 0; display: flex; align-items: center; gap: 14px; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: 30px; line-height: 1.05; letter-spacing: 0.02em; color: #f3ead7">CLIENT 0 IS <span style="color: #ff4d1a">EVOROVE</span> ITSELF.</p>
+<p style="margin: 0; max-width: 520px; color: #958f83">We sell our own subscription through the same board, under the same rules, before anyone else's.</p>
+</div>
+</section>
+
+<section id="how" style="max-width: 1280px; margin: 0 auto; padding: 112px clamp(20px, 5vw, 48px) 32px; display: flex; flex-direction: column; gap: 40px">
+<div style="display: flex; flex-direction: column; gap: 12px">
+<p style="margin: 0; font-size: 11px; line-height: 14px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">HOW IT WORKS</p>
+<h2 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(40px, 10vw, 64px); line-height: 0.95; letter-spacing: 0.01em">THREE MOVES. ONE BOARD.</h2>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 24px">
+<article style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: clamp(24px, 6vw, 32px); display: flex; flex-direction: column; gap: 18px; min-height: 280px">
+<p style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">01</p>
+<h3 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: clamp(44px, 12vw, 56px); line-height: 0.9">FIND.</h3>
+<p style="margin: 0; color: #958f83">Bring your contacts and the reason to write. On Pro, Evorove also finds US companies with visible pain and keeps the evidence on the card.</p>
+</article>
+<article style="background: #0f0e0c; border: 1px solid #ff4d1a; border-radius: 10px; padding: clamp(24px, 6vw, 32px); display: flex; flex-direction: column; gap: 18px; min-height: 280px">
+<p style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">02</p>
+<h3 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: clamp(44px, 12vw, 56px); line-height: 0.9">CLOSE.</h3>
+<p style="margin: 0; color: #958f83">Evorove writes the first email, answers replies, works objections and sends your approved offer and payment link. A confirmed payment moves the deal to Done.</p>
+</article>
+<article style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: clamp(24px, 6vw, 32px); display: flex; flex-direction: column; gap: 18px; min-height: 280px">
+<p style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">03</p>
+<h3 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: clamp(44px, 12vw, 56px); line-height: 0.9">NEXT.</h3>
+<p style="margin: 0; color: #958f83">The board keeps moving. Every conversation, every stage, in one place.</p>
+</article>
+</div>
+</section>
+
+<section aria-label="Trailer" style="max-width: 1280px; margin: 0 auto; padding: 112px clamp(20px, 5vw, 48px) 32px; display: flex; flex-wrap: wrap; gap: 64px; align-items: center">
+<div style="flex: 0 1 360px; min-width: 0; margin: 0 auto">
+<video src="teaser-540.mp4" poster="teaser-poster.jpg" autoplay="autoplay" muted="muted" loop="loop" playsinline="playsinline" controls="controls" aria-label="Evorove teaser, 22 seconds" style="display: block; width: 100%; aspect-ratio: 9 / 16; object-fit: cover; border-radius: 10px; border: 1px solid #282622; background: #000000"></video>
+</div>
+<div style="flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 20px">
+<p style="margin: 0; font-size: 11px; line-height: 14px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">22 SECONDS</p>
+<h2 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(40px, 10vw, 64px); line-height: 0.95; letter-spacing: 0.01em">SEE IT MOVE.</h2>
+<p style="margin: 0; max-width: 480px; font-size: 17px; line-height: 27px; color: #958f83">A reason to write. A first email. A conversation that keeps going. A payment link at the right moment. This is the whole idea in one short film.</p>
+<a class="ev-btn-ghost" href="#board-preview" style="align-self: flex-start; padding: 14px 24px; border-radius: 6px; font-weight: 600">Look inside the board</a>
+</div>
+</section>
+
+<section id="board-preview" aria-label="The board" style="max-width: 1280px; margin: 0 auto; padding: 112px clamp(20px, 5vw, 48px) 32px; display: flex; flex-direction: column; gap: 40px">
+<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-end; justify-content: space-between">
+<div style="display: flex; flex-direction: column; gap: 12px">
+<p style="margin: 0; font-size: 11px; line-height: 14px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">WHAT YOU GET</p>
+<h2 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(40px, 10vw, 64px); line-height: 0.95; letter-spacing: 0.01em">THE WHOLE SALE.<br>ONE BOARD.</h2>
+</div>
+<p style="margin: 0; max-width: 420px; color: #958f83">Every person has a card: the reason Evorove wrote, the evidence and its source, the full conversation and the next move.</p>
+</div>
+<div style="align-self: center; max-width: 100%; border-radius: 10px; border: 1px solid #282622; overflow: hidden">
+<div class="ev-board-scale" style="width: 1440px; height: 900px">
+
+<div style="width: 1440px; height: 900px; box-sizing: border-box; background: #070604; color: #f3ead7; font-family: Inter, system-ui, -apple-system, sans-serif; font-size: 14px; line-height: 20px; display: flex; flex-direction: column">
+
+<header style="height: 72px; box-sizing: border-box; padding: 0 32px; border-bottom: 1px solid #282622; display: flex; align-items: center; justify-content: space-between">
+<div style="display: flex; align-items: center; gap: 12px">
+<span class="ev-dot" style="width: 10px; height: 10px" aria-hidden="true"></span>
+<span style="font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: 22px; letter-spacing: 0.18em">EVOROVE</span>
+</div>
+<nav aria-label="App" style="display: flex; gap: 28px; font-weight: 500">
+<a href="#board" style="text-decoration: none; color: #f3ead7">Board</a>
+<a href="#contacts" style="text-decoration: none; color: #958f83">Contacts</a>
+<a href="#metrics" style="text-decoration: none; color: #958f83">Metrics</a>
+<a href="#settings" style="text-decoration: none; color: #958f83">Settings</a>
+</nav>
+<p style="margin: 0; display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83"><span style="width: 6px; height: 6px; border-radius: 999px; background: #ff4d1a"></span>OUTREACH ACTIVE · PRO</p>
+</header>
+
+<div style="padding: 24px 32px 0; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px">
+<div style="display: flex; flex-direction: column; gap: 8px">
+<p style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">YOUR SALES BOARD</p>
+<h1 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: 44px; line-height: 1">[BUSINESS NAME]</h1>
+</div>
+<div style="display: flex; gap: 10px">
+<a class="ev-btn-ghost" href="#contacts" style="padding: 11px 18px; border-radius: 6px; font-weight: 600">Add contacts</a>
+<a class="ev-btn-ghost" href="#preview" style="padding: 11px 18px; border-radius: 6px; font-weight: 600">Search preview</a>
+<button type="button" class="ev-btn-primary" style="padding: 11px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; border: 0; font-family: inherit; cursor: pointer">Find people</button>
+</div>
+</div>
+
+<div style="flex: 1; min-height: 0; padding: 24px 32px 32px; display: flex; gap: 24px">
+<div style="flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px">
+
+<section aria-label="Cold" style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">COLD <span>3</span></h2>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Pain: [quote from a public source]</span></div>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Your note: [reason to write]</span></div>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Pain: [quote from a public source]</span></div>
+</section>
+
+<section aria-label="In progress" style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">IN PROGRESS <span>2</span></h2>
+<div style="background: #181613; border: 1px solid #ff4d1a; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Replied · objection: timing</span></div>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">First email sent</span></div>
+</section>
+
+<section aria-label="Offer made" style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">OFFER MADE <span>1</span></h2>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="color: #958f83; font-size: 13px">Payment link sent</span></div>
+</section>
+
+<section aria-label="Done" style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">DONE <span>1</span></h2>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 8px"><strong style="font-weight: 600">[Name] · [Company]</strong><span style="align-self: flex-start; padding: 4px 10px; border-radius: 999px; background: #ff4d1a; color: #070604; font-size: 12px; font-weight: 600; box-shadow: 0 0 18px rgba(255,77,26,.55)">Paid · [AMOUNT]</span></div>
+</section>
+</div>
+
+<aside aria-label="Person details" style="width: 360px; flex-shrink: 0; background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: 24px; display: flex; flex-direction: column; gap: 18px">
+<p style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">THE CONVERSATION</p>
+<h2 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: 32px; line-height: 1">[NAME] · [COMPANY]</h2>
+<div style="background: #181613; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 6px">
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">EVIDENCE</span>
+<span>“[Quote from a public source]”</span>
+<a href="#source" style="font-size: 13px; color: #958f83">Source link</a>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px">
+<div style="background: #181613; border-radius: 6px; padding: 12px 14px; color: #958f83; font-size: 13px">Evorove · first email · [date]</div>
+<div style="background: #181613; border: 1px solid #282622; border-radius: 6px; padding: 12px 14px; font-size: 13px">Reply · [date]</div>
+<div style="background: #181613; border-radius: 6px; padding: 12px 14px; color: #958f83; font-size: 13px">Evorove · answer to objection · [date]</div>
+</div>
+<p style="margin: auto 0 0; font-size: 13px; color: #958f83">Next move: confirm the need, then the offer.</p>
+</aside>
+</div>
+</div>
+
+</div>
+</div>
+</section>
+
+<section style="max-width: 1280px; margin: 0 auto; padding: 96px clamp(20px, 5vw, 48px) 32px; display: flex; flex-direction: column; gap: 40px">
+<div style="display: flex; flex-direction: column; gap: 12px">
+<p style="margin: 0; font-size: 11px; line-height: 14px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">A SALES ENGINE IN YOUR CORNER</p>
+<h2 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(40px, 10vw, 64px); line-height: 0.95; letter-spacing: 0.01em">YOU KNOW THE OFFER.<br>EVOROVE KEEPS THE THREAD.</h2>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 1px; background: #282622; border: 1px solid #282622; border-radius: 10px; overflow: hidden">
+<div style="background: #070604; padding: 32px; display: flex; flex-direction: column; gap: 10px">
+<h3 style="margin: 0; font-size: 17px; font-weight: 600">Start with something real</h3>
+<p style="margin: 0; color: #958f83">The first email opens with the pain, not a generic pitch. Add your own reason for reaching out, or use the public evidence found on Pro.</p>
+</div>
+<div style="background: #070604; padding: 32px; display: flex; flex-direction: column; gap: 10px">
+<h3 style="margin: 0; font-size: 17px; font-weight: 600">Keep replies moving</h3>
+<p style="margin: 0; color: #958f83">Incoming email stays with the same person. Evorove responds to the conversation and works toward the next sales move.</p>
+</div>
+<div style="background: #070604; padding: 32px; display: flex; flex-direction: column; gap: 10px">
+<h3 style="margin: 0; font-size: 17px; font-weight: 600">Make your offer</h3>
+<p style="margin: 0; color: #958f83">Your offer text. Your payment link. The engine cannot invent a price, a discount, or a promise you did not approve.</p>
+</div>
+<div style="background: #070604; padding: 32px; display: flex; flex-direction: column; gap: 10px">
+<h3 style="margin: 0; font-size: 17px; font-weight: 600">Read the whole sale</h3>
+<p style="margin: 0; color: #958f83">Cold, In progress, Offer made, Done. Open a card for the reason, the evidence and the full email conversation.</p>
+</div>
+</div>
+</section>
+
+<section id="pricing" style="max-width: 1280px; margin: 0 auto; padding: 112px clamp(20px, 5vw, 48px) 32px; display: flex; flex-direction: column; gap: 40px">
+<div style="display: flex; flex-direction: column; gap: 12px">
+<p style="margin: 0; font-size: 11px; line-height: 14px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a">PRICING</p>
+<h2 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(40px, 10vw, 64px); line-height: 0.95; letter-spacing: 0.01em">BRING YOUR CONTACTS.<br>OR FIND THE NEXT ONES.</h2>
+<p style="margin: 0; color: #958f83">Monthly subscriptions. Cancel anytime.</p>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 24px">
+<article style="background: #0f0e0c; border: 1px solid #282622; border-radius: 10px; padding: clamp(24px, 6vw, 36px); display: flex; flex-direction: column; gap: 24px">
+<div style="display: flex; flex-direction: column; gap: 10px">
+<p style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">STARTER · YOUR CONTACTS</p>
+<h3 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(30px, 8vw, 40px); line-height: 1">PUT YOUR CONTACTS INTO MOTION.</h3>
+</div>
+<p style="margin: 0; display: flex; align-items: baseline; gap: 8px"><span style="font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: clamp(64px, 18vw, 88px); line-height: 0.9">$199</span><span style="color: #958f83">/month</span></p>
+<ul style="margin: 0; padding: 0 0 0 18px; display: flex; flex-direction: column; gap: 10px; color: #f3ead7">
+<li>Sell to contacts you add by CSV or one at a time</li>
+<li>A first email grounded in the real pain you describe</li>
+<li>Email replies and objection handling</li>
+<li>Your offer with your payment link</li>
+<li>Payment recorded → Done on your board</li>
+</ul>
+<a class="ev-btn-ghost" href="#checkout-starter" style="align-self: flex-start; padding: 14px 24px; border-radius: 6px; font-weight: 600">Choose Starter</a>
+</article>
+<article style="background: #0f0e0c; border: 1px solid #ff4d1a; border-radius: 10px; padding: clamp(24px, 6vw, 36px); display: flex; flex-direction: column; gap: 24px">
+<div style="display: flex; flex-direction: column; gap: 10px">
+<p style="margin: 0; display: flex; align-items: center; gap: 10px; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; color: #ff4d1a"><span style="width: 8px; height: 8px; border-radius: 999px; background: #ff4d1a"></span>PRO · FIND AND CLOSE</p>
+<h3 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(30px, 8vw, 40px); line-height: 1">FIND THE PAIN. KEEP THE SALE MOVING.</h3>
+</div>
+<p style="margin: 0; display: flex; align-items: baseline; gap: 8px"><span style="font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: clamp(64px, 18vw, 88px); line-height: 0.9; color: #ff4d1a">$499</span><span style="color: #958f83">/month</span></p>
+<ul style="margin: 0; padding: 0 0 0 18px; display: flex; flex-direction: column; gap: 10px; color: #f3ead7">
+<li>Everything in Starter</li>
+<li>Lead search across US companies with visible pain</li>
+<li>Evidence quotes and source links on each found person</li>
+<li>Search preview before adding people to your board</li>
+</ul>
+<a class="ev-btn-primary" href="#checkout-pro" style="align-self: flex-start; padding: 14px 24px; border-radius: 6px; font-weight: 600">Choose Pro</a>
+</article>
+</div>
+</section>
+
+<section id="faq" style="max-width: 880px; margin: 0 auto; padding: 112px clamp(20px, 5vw, 48px) 32px; display: flex; flex-direction: column; gap: 32px">
+<div style="display: flex; flex-direction: column; gap: 12px">
+<p style="margin: 0; font-size: 11px; line-height: 14px; font-weight: 600; letter-spacing: 0.18em; color: #958f83">QUESTIONS, ANSWERED</p>
+<h2 style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(40px, 10vw, 64px); line-height: 0.95; letter-spacing: 0.01em">KNOW WHAT HAPPENS NEXT.</h2>
+</div>
+<div style="display: flex; flex-direction: column; border-top: 1px solid #282622">
+<details style="border-bottom: 1px solid #282622; padding: 20px 0"><summary style="display: flex; justify-content: space-between; gap: 16px; font-weight: 600; font-size: 17px">What does Evorove do?<span aria-hidden="true" style="color: #ff4d1a">+</span></summary><p style="margin: 12px 0 0; color: #958f83">Evorove writes the first email from a real reason, answers replies and brings the conversation to your offer and payment link. Every step is on your board.</p></details>
+<details style="border-bottom: 1px solid #282622; padding: 20px 0"><summary style="display: flex; justify-content: space-between; gap: 16px; font-weight: 600; font-size: 17px">What is the difference between Starter and Pro?<span aria-hidden="true" style="color: #ff4d1a">+</span></summary><p style="margin: 12px 0 0; color: #958f83">Starter sells to the contacts you bring. Pro adds lead search for US companies with visible pain.</p></details>
+<details style="border-bottom: 1px solid #282622; padding: 20px 0"><summary style="display: flex; justify-content: space-between; gap: 16px; font-weight: 600; font-size: 17px">Can Evorove change my price or make promises?<span aria-hidden="true" style="color: #ff4d1a">+</span></summary><p style="margin: 12px 0 0; color: #958f83">No. It uses your offer and payment link and cannot invent a price, discount or guarantee.</p></details>
+<details style="border-bottom: 1px solid #282622; padding: 20px 0"><summary style="display: flex; justify-content: space-between; gap: 16px; font-weight: 600; font-size: 17px">What happens if someone asks to stop?<span aria-hidden="true" style="color: #ff4d1a">+</span></summary><p style="margin: 12px 0 0; color: #958f83">Unsubscribes and stop requests suppress further outreach. Sending respects quiet hours and your daily cap.</p></details>
+<details style="border-bottom: 1px solid #282622; padding: 20px 0"><summary style="display: flex; justify-content: space-between; gap: 16px; font-weight: 600; font-size: 17px">Can I cancel?<span aria-hidden="true" style="color: #ff4d1a">+</span></summary><p style="margin: 12px 0 0; color: #958f83">Yes, anytime from your subscription settings. Access stays until the end of the paid period.</p></details>
+</div>
+</section>
+
+<section aria-label="Get started" style="position: relative; margin-top: 112px; background: #000000; border-top: 1px solid #282622">
+<div style="max-width: 1280px; margin: 0 auto; padding: 128px clamp(20px, 5vw, 48px); display: flex; flex-direction: column; align-items: center; gap: 28px; text-align: center">
+<p style="margin: 0; display: flex; align-items: center; gap: 22px">
+<span class="ev-dot" aria-hidden="true" style="width: 20px; height: 20px"></span>
+<span style="font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 600; font-size: clamp(40px, 11vw, 72px); line-height: 1; letter-spacing: 0.18em; color: #f3ead7">EVOROVE</span>
+</p>
+<p style="margin: 0; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 500; font-size: 16px; letter-spacing: 0.4em; color: #f3ead7">FIND · CLOSE · NEXT</p>
+<a class="ev-btn-primary" href="#pricing" style="margin-top: 12px; padding: 16px 28px; border-radius: 6px; font-weight: 600; font-size: 15px">Choose your plan</a>
+</div>
+</section>
+
+<footer style="background: #000000; border-top: 1px solid #282622">
+<div style="max-width: 1280px; margin: 0 auto; padding: 24px clamp(20px, 5vw, 48px); display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; font-size: 13px; color: #958f83">
+<span>Evorove · US B2B</span>
+<span style="display: flex; flex-wrap: wrap; gap: 24px"><a href="#terms" style="display: inline-block; padding: 12px 0; color: #958f83; text-decoration: none">Terms</a><a href="#privacy" style="display: inline-block; padding: 12px 0; color: #958f83; text-decoration: none">Privacy</a><a href="#dpa" style="display: inline-block; padding: 12px 0; color: #958f83; text-decoration: none">DPA</a><a href="#subprocessors" style="display: inline-block; padding: 12px 0; color: #958f83; text-decoration: none">Subprocessors</a></span>
+</div>
+</footer>
+
+</div>
+</body></html>
