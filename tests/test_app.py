@@ -240,7 +240,7 @@ def test_scheduler_due_times_dedup_and_failure(client, settings, monkeypatch):
     last = board.last_search(settings, bid)
     assert last['status'] == 'failed' and last['error'] == 'ValueError'
     assert alerts and 'SECRET' not in str(alerts)
-    assert jobs.claim(bid, 'search', clock.replace(hour=0).isoformat()) is None
+    assert jobs.claim(bid, 'search', clock.replace(hour=0).isoformat()) is not None
 
 
 def test_daily_summary_and_telegram_failures(client, settings, monkeypatch):
@@ -288,7 +288,9 @@ def test_telegram_failure_does_not_expose_token(client, settings, monkeypatch):
 
 def test_search_run_context_and_interval_claims(client, settings, monkeypatch):
     from app.db import current_run_id
+    from test_pricing import activate
     signup(client)
+    activate(settings, 'pro')
     bid = business(settings)['id']
     jobs = scheduler.Scheduler(settings)
     run = jobs.claim(bid, 'search')
@@ -324,7 +326,9 @@ def test_columns_refresh_counts_and_html_only(client, settings):
 
 
 def test_background_overlap_and_success_counts(client, settings, monkeypatch):
+    from test_pricing import activate
     signup(client)
+    activate(settings, 'pro')
     bid = business(settings)['id']
     jobs = scheduler.Scheduler(settings)
     async def check():

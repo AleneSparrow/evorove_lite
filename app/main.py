@@ -164,7 +164,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         selected = request.query_params.get('person')
         business = board.business(s, bid)
         return render(request, 'board.html', business=business, columns=board.columns(s, bid),
-                      last=board.last_search(s, bid), can_search=billing.can_search(business), person=board.person(s, bid, selected) if selected else None)
+                      entitled=billing.entitled(business), last=board.last_search(s, bid), can_search=billing.can_search(business), person=board.person(s, bid, selected) if selected else None)
 
     @app.get('/app/people/{person_id}')
     def person_detail(request: Request, person_id: str):
