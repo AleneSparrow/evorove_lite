@@ -36,3 +36,33 @@ def test_landing_widths_fit_and_hero_clears_radar(page, live_app):
             expected = max(84, min(168, width * .13))
         assert abs(metrics['fontSize'] - expected) < 1.5, metrics
         assert abs(metrics['zoom'] - expected_zoom[width]) < .011, metrics
+        columns = page.locator('.feature-grid').evaluate(
+            '(grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").filter(Boolean).length')
+        assert columns == (1 if width <= 720 else 2), (width, columns)
+
+
+def _paint(page, locator):
+    return locator.evaluate('''(el) => {
+      const style = getComputedStyle(el);
+      return {color: style.color, background: style.backgroundColor};
+    }''')
+
+
+def test_primary_button_text_differs_from_its_background(page, live_app):
+    base, _, _ = live_app
+    page.goto(base + '/', wait_until='networkidle')
+    for width in (1440, 390):
+        page.set_viewport_size({'width': width, 'height': 900})
+        buttons = page.locator('a.ev-btn-primary, button.ev-btn-primary, a.button:not(.secondary)')
+        assert buttons.count() >= 4
+        for index in range(buttons.count()):
+            button = buttons.nth(index)
+            resting = _paint(page, button)
+            assert resting['color'] != resting['background'], (width, index, resting)
+            assert resting['color'] == 'rgb(7, 6, 4)', (width, index, resting)
+            assert resting['background'] == 'rgb(255, 77, 26)', (width, index, resting)
+            button.hover()
+            hovered = _paint(page, button)
+            assert hovered['color'] != hovered['background'], (width, index, hovered)
+            assert hovered['color'] == 'rgb(7, 6, 4)', (width, index, hovered)
+            assert hovered['background'] == 'rgb(224, 68, 23)', (width, index, hovered)

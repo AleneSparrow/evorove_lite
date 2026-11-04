@@ -124,3 +124,40 @@ def test_board_desktop_and_mobile_screenshots(page, live_app):
         page.evaluate('() => document.fonts.ready')
         assert page.evaluate('() => document.documentElement.scrollWidth === window.innerWidth')
         page.screenshot(path=str(output / f'board-{label}.png'), full_page=True)
+        if viewport['width'] == 390:
+            phone = page.evaluate('''() => {
+              const columns = [...document.querySelectorAll('.column')];
+              const board = document.querySelector('.board');
+              const pane = document.querySelector('#person-pane');
+              const nav = document.querySelector('.app-header nav');
+              const links = [...nav.querySelectorAll('a')];
+              const brand = document.querySelector('.app-header .brand').getBoundingClientRect();
+              const status = document.querySelector('.app-status').getBoundingClientRect();
+              const tops = links.map((link) => link.getBoundingClientRect().top);
+              return {
+                titles: columns.map((column) => column.querySelector('h2').textContent),
+                displays: columns.map((column) => getComputedStyle(column).display),
+                tops: columns.map((column) => column.getBoundingClientRect().top),
+                overflowX: getComputedStyle(board).overflowX,
+                snap: getComputedStyle(board).scrollSnapType,
+                paneTop: pane.getBoundingClientRect().top,
+                boardBottom: board.getBoundingClientRect().bottom,
+                scrollWidth: document.documentElement.scrollWidth,
+                innerWidth: window.innerWidth,
+                flexWrap: getComputedStyle(nav).flexWrap,
+                linkTops: tops,
+                statusBelowLogo: status.top >= brand.bottom - 1,
+              };
+            }''')
+            text = ' '.join(phone['titles'])
+            for name in ('Cold', 'In progress', 'Offer made', 'Done'):
+                assert name in text
+            assert phone['displays'] and all(value != 'none' for value in phone['displays'])
+            assert max(phone['tops']) - min(phone['tops']) < 2
+            assert phone['overflowX'] == 'auto'
+            assert 'x' in phone['snap']
+            assert phone['paneTop'] >= phone['boardBottom'] - 1
+            assert phone['scrollWidth'] == phone['innerWidth']
+            assert phone['flexWrap'] == 'nowrap'
+            assert max(phone['linkTops']) - min(phone['linkTops']) < 2
+            assert phone['statusBelowLogo']

@@ -254,7 +254,8 @@ def test_pro_search_limit_counts_the_owner_local_day_not_the_utc_day(client, set
 
 def test_pro_card_and_faq_describe_search_without_volume_promises(client):
     landing, faq = client.get('/').text, client.get('/faq').text
-    assert 'Daily lead search across US companies' in landing
+    assert 'Search for US companies with visible pain' in landing
+    assert 'Daily lead search across US companies' not in landing
     assert '20 verified new leads' not in landing
     assert 'adds lead search for US companies with visible pain.' in faq
     assert '20 verified new leads' not in faq
