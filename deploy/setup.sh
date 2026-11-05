@@ -82,7 +82,7 @@ if [ ! -e "$CONFIG_DIR/litestream.env" ]; then
     install -o root -g "$APP_GROUP" -m 0640 /dev/null "$CONFIG_DIR/litestream.env"
 fi
 if [ ! -e /etc/cloudflared/evorove.token ]; then
-    install -o root -g cloudflared -m 0640 /dev/null /etc/cloudflared/evorove.token
+    install -o cloudflared -g cloudflared -m 0600 /dev/null /etc/cloudflared/evorove.token
 fi
 
 ARCH=$(dpkg --print-architecture)
