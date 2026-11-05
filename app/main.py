@@ -359,6 +359,18 @@ def create_app(settings=None, *, scheduler_enabled=True):
     def public_page(request: Request):
         return render(request, request.url.path.strip('/') + '.html')
 
+    @app.get('/api/v1/public/unsubscribe/{token}')
+    @app.post('/api/v1/public/unsubscribe/{token}')
+    def legacy_unsubscribe_result(request: Request, token: str):
+        from app.legacy_unsubscribe import unsubscribe as legacy_unsubscribe
+        done = request.method == 'POST'
+        email = legacy_unsubscribe(request.app.state.settings, token, apply=done)
+        response = render(request, 'unsubscribe.html', email=email, token=token, done=done,
+                          unrecognized=email is None, form_action=request.url.path)
+        if email is None:
+            response.status_code = 400
+        return response
+
     @app.get('/unsubscribe/{token}')
     def unsubscribe_page(request: Request, token: str):
         email = board.unsubscribe(request.app.state.settings, token)
