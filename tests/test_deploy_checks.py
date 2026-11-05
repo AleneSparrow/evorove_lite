@@ -38,8 +38,26 @@ def test_optional_and_telegram_pair(token, chat, ok, capsys):
     output = capsys.readouterr().out
     for name in checks.env_values(example).keys() - checks.REQUIRED_ENV:
         if not checks.env_values(actual).get(name):
-            assert 'INFO optional not set: ' + name in output
+            if name in checks.WARN_IF_EMPTY:
+                assert 'WARN ' + name + ' is empty' in output
+            else:
+                assert 'INFO optional not set: ' + name in output
     assert 'synthetic' not in output
+
+
+def test_empty_operator_warns_and_does_not_fail(capsys):
+    example = (checks.ROOT / '.env.example').read_text()
+    assert 'OPERATOR_NAME=' in example and 'OPERATOR_ADDRESS=' in example
+    assert {'OPERATOR_NAME', 'OPERATOR_ADDRESS'} <= checks.OPTIONAL_ENV
+    assert checks.check_environment(example, required_values()) is True
+    output = capsys.readouterr().out
+    assert 'WARN OPERATOR_NAME is empty' in output
+    assert 'WARN OPERATOR_ADDRESS is empty' in output
+    assert 'FAIL OPERATOR_NAME' not in output and 'FAIL OPERATOR_ADDRESS' not in output
+    assert checks.check_environment(example, required_values() + '\nOPERATOR_NAME=Ada\nOPERATOR_ADDRESS=1 Main') is True
+    filled = capsys.readouterr().out
+    assert 'WARN OPERATOR_NAME' not in filled and 'WARN OPERATOR_ADDRESS' not in filled
+    assert 'Ada' not in filled and '1 Main' not in filled
 
 
 @pytest.mark.parametrize('address,safe', [
