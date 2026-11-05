@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maintenance · Evorove</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+@font-face{font-family:"Barlow Condensed";font-style:normal;font-weight:600;font-display:swap;src:url("/static/fonts/barlow-condensed-600.woff2") format("woff2")}
+@font-face{font-family:Inter;font-style:normal;font-weight:400;font-display:swap;src:url("/static/fonts/inter-400.woff2") format("woff2")}
+@font-face{font-family:Inter;font-style:normal;font-weight:600;font-display:swap;src:url("/static/fonts/inter-600.woff2") format("woff2")}
+:root{--bg:#070604;--text:#f3ead7;--muted:#958f83;--accent:#ff4d1a;--accent-hover:#e04417;--on-accent:#070604;color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text)}
+body{min-height:100vh;display:flex;flex-direction:column;font-family:Inter,system-ui,-apple-system,sans-serif;font-size:15px;line-height:1.55}
+.site-header,.error-panel{max-width:1440px;margin:0 auto;padding:28px clamp(20px,5vw,48px);width:100%}
+.site-header{display:flex;align-items:center}
+main{flex:1;display:flex;align-items:center;width:100%}
+.brand{display:inline-flex;align-items:center;gap:14px;color:var(--text);text-decoration:none;min-height:44px}
+.brand-lockup{display:flex;flex-direction:column;gap:4px;font-family:"Barlow Condensed","Arial Narrow",sans-serif;font-weight:600;font-size:26px;line-height:1;letter-spacing:.18em}
+.brand-lockup span{font-weight:500;font-size:11px;line-height:1.2;letter-spacing:.4em;color:var(--muted);text-transform:uppercase}
+.ev-dot{display:inline-block;width:12px;height:12px;flex:none;border-radius:999px;background:var(--accent);box-shadow:0 0 18px rgba(255,77,26,.55);animation:ev-beat 1.15s cubic-bezier(.3,0,.2,1) infinite}
+@keyframes ev-beat{0%{transform:scale(1);box-shadow:0 0 18px rgba(255,77,26,.55)}17%{transform:scale(1.45);box-shadow:0 0 42px rgba(255,77,26,.9)}32%{transform:scale(1);box-shadow:0 0 18px rgba(255,77,26,.55)}46%{transform:scale(1.25);box-shadow:0 0 30px rgba(255,77,26,.75)}60%,100%{transform:scale(1);box-shadow:0 0 18px rgba(255,77,26,.55)}}
+.error-panel{display:flex;flex-direction:column;align-items:flex-start;gap:16px}
+.eyebrow{margin:0;font-size:11px;line-height:14px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+h1{margin:0;font-family:"Barlow Condensed","Arial Narrow",sans-serif;font-weight:600;font-size:clamp(36px,6vw,44px);line-height:1;letter-spacing:.01em;text-transform:uppercase;overflow-wrap:break-word;max-width:100%}
+.error-panel p{margin:0;max-width:36ch;color:var(--muted)}
+.ev-btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:12px 18px;border-radius:6px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:14px;text-decoration:none}
+.ev-btn-primary:hover{background:var(--accent-hover);color:var(--on-accent)}
+@media(prefers-reduced-motion:reduce){.ev-dot{animation:none}}
+</style>
+</head>
+<body class="error-page">
+<header class="site-header"><a class="brand" href="/"><i class="ev-dot" aria-hidden="true"></i><strong class="brand-lockup">EVOROVE<span>Find · close · next</span></strong></a></header>
+<main><div class="error-panel"><p class="eyebrow">Maintenance</p><h1>Down for maintenance</h1><p>The site is unavailable right now.</p><a class="ev-btn-primary" href="/">Back to home</a></div></main>
+</body>
+</html>

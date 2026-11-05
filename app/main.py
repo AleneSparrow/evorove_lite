@@ -1,20 +1,33 @@
 import asyncio
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import auth, billing, board, contacts, outreach, search
 from .scheduler import Scheduler
 from .db import ROOT, connect, migrate, now
 from .settings import load
+
+log = logging.getLogger(__name__)
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; form-action 'self' https://*.lemonsqueezy.com",
+}
 
 
 def create_app(settings=None, *, scheduler_enabled=True):
@@ -38,15 +51,33 @@ def create_app(settings=None, *, scheduler_enabled=True):
     templates = Jinja2Templates(directory=str(ROOT / "app/templates"))
     app.mount("/static", StaticFiles(directory=ROOT / "app/static"), name="static")
 
+    def apply_security_headers(response):
+        response.headers.update(SECURITY_HEADERS)
+        return response
+
+    def error_page(request, status):
+        # htmx swaps the response into a board pane, so it gets the panel only.
+        template = "error_fragment.html" if request.headers.get("hx-request") == "true" else f"{status}.html"
+        response = templates.TemplateResponse(request=request, name=template, context={"code": status}, status_code=status)
+        return apply_security_headers(response)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_errors(request: Request, exc: StarletteHTTPException):
+        if exc.status_code == 404:
+            return error_page(request, 404)
+        if exc.status_code == 500:
+            return error_page(request, 500)
+        response = await http_exception_handler(request, exc)
+        return apply_security_headers(response)
+
+    @app.exception_handler(Exception)
+    async def unhandled_error(request: Request, exc: Exception):
+        log.error("Unhandled %s", type(exc).__name__)
+        return error_page(request, 500)
+
     @app.middleware("http")
     async def security_headers(request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "same-origin"
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; form-action 'self' https://*.lemonsqueezy.com"
-        return response
+        return apply_security_headers(await call_next(request))
 
     def render(request, template, **context):
         s = request.app.state.settings
