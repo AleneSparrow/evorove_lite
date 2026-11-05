@@ -22,6 +22,7 @@ LEMONSQUEEZY_API_KEY LEMONSQUEEZY_WEBHOOK_SECRET LEMONSQUEEZY_STORE_ID
 LEMONSQUEEZY_VARIANT_STARTER LEMONSQUEEZY_VARIANT_PRO
 SYSTEM_SMTP_HOST SYSTEM_SMTP_PORT SYSTEM_SMTP_USER SYSTEM_SMTP_PASSWORD SYSTEM_SMTP_FROM
 '''.split())
+OPTIONAL_ENV = frozenset({'LEGACY_ACCOUNT_SECURITY_ENCRYPTION_KEY'})
 SMOKE_REQUESTS = (
     ('/health', 'GET', (200,)), ('/', 'GET', (200,)),
     ('/login', 'GET', (200,)), ('/faq', 'GET', (200,)), ('/terms', 'GET', (200,)),
@@ -54,7 +55,7 @@ def check_environment(example, actual):
     missing = missing_env(actual)
     for name in missing:
         print('MISSING ' + name)
-    for name in sorted(env_values(example).keys() - REQUIRED_ENV):
+    for name in sorted((env_values(example).keys() | OPTIONAL_ENV) - REQUIRED_ENV):
         if not values.get(name, '').strip():
             print('INFO optional not set: ' + name)
     token = bool(values.get('TELEGRAM_BOT_TOKEN', '').strip())
