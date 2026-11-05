@@ -86,7 +86,9 @@ def create_app(settings=None, *, scheduler_enabled=True):
         s = request.app.state.settings
         nonce = request.cookies.get("csrf") or secrets.token_urlsafe(24)
         csrf = URLSafeTimedSerializer(s.secret, salt="csrf").dumps(nonce)
-        response = templates.TemplateResponse(request=request, name=template, context={"csrf": csrf, **context})
+        response = templates.TemplateResponse(request=request, name=template, context={
+            "csrf": csrf, **context,
+            "operator_name": s.operator_name, "operator_address": s.operator_address})
         response.set_cookie("csrf", nonce, secure=True, httponly=True, samesite="lax", max_age=3600)
         return response
 

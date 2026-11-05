@@ -49,7 +49,8 @@ def test_unrecognized_legacy_link(client, settings, mode, method):
         token = 'bad.неверно'
     response = getattr(client, method)('/api/v1/public/unsubscribe/' + token)
     assert response.status_code == 400
-    assert 'Ссылка не распознана' in response.text and 'STOP' in response.text
+    assert 'Link not recognized' in response.text
+    assert 'Reply to the email with STOP and we will remove you.' in response.text
     assert 'Traceback' not in response.text and KEY not in response.text
 
 

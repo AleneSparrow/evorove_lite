@@ -25,6 +25,14 @@ class Settings:
     def db_path(self):
         return self.get("DB_PATH", "evorove.sqlite3")
 
+    @property
+    def operator_name(self):
+        return self.get("OPERATOR_NAME").strip() or "[operator name pending]"
+
+    @property
+    def operator_address(self):
+        return self.get("OPERATOR_ADDRESS").strip() or "[operator address pending]"
+
 
 def load(path=".env"):
     values = {}
