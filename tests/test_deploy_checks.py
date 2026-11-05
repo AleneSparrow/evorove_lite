@@ -1,4 +1,5 @@
 """Deployment checks use synthetic env data, local HTTP and disposable SQLite only."""
+import ast
 import importlib.util
 from pathlib import Path
 import sqlite3
@@ -13,10 +14,32 @@ checks = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checks)
 
 
+def required_values():
+    return '\n'.join(f'{key}=synthetic' for key in checks.REQUIRED_ENV)
+
+
 def test_env_presence_only():
-    example = 'A=\nB=\nC=\nD=\nE=\n'
-    actual = '# comment\nA="secret"\nB=\'\'\nC=   \nD=$(never-execute)\nA=last-value\n'
-    assert checks.missing_env(example, actual) == ['B', 'C', 'E']
+    actual = required_values() + '\nSECRET_KEY=""\nDB_PATH=   \nAPP_BASE_URL=$(never-execute)'
+    assert checks.missing_env(actual) == ['DB_PATH', 'SECRET_KEY']
+
+
+@pytest.mark.parametrize('missing', sorted(checks.REQUIRED_ENV))
+def test_each_required_variable(missing, capsys):
+    assert not checks.check_environment('', required_values() + f'\n{missing}=')
+    assert 'MISSING ' + missing in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('token,chat,ok', [('', '', True), ('synthetic-token', '', False),
+                                        ('', 'synthetic-chat', False), ('synthetic-token', 'synthetic-chat', True)])
+def test_optional_and_telegram_pair(token, chat, ok, capsys):
+    example = (checks.ROOT / '.env.example').read_text()
+    actual = required_values() + f'\nTELEGRAM_BOT_TOKEN={token}\nTELEGRAM_CHAT_ID={chat}'
+    assert checks.check_environment(example, actual) is ok
+    output = capsys.readouterr().out
+    for name in checks.env_values(example).keys() - checks.REQUIRED_ENV:
+        if not checks.env_values(actual).get(name):
+            assert 'INFO optional not set: ' + name in output
+    assert 'synthetic' not in output
 
 
 @pytest.mark.parametrize('address,safe', [
@@ -43,7 +66,7 @@ def test_response(status, body, allowed, ok):
     assert bool(checks.response_ok(status, body, allowed)) is ok
 
 
-@pytest.mark.parametrize('bad', [None, '/health', '/', '/login', '/pricing', '/billing/webhook', '/static/style.css', '/static/htmx.min.js'])
+@pytest.mark.parametrize('bad', [None, '/health', '/', '/login', '/faq', '/terms', '/billing/webhook', '/static/style.css', '/static/htmx.min.js'])
 def test_smoke_over_http(bad, capsys):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -133,7 +156,7 @@ def test_preflight_synthetic_files(monkeypatch, capsys):
 
     def read(path, *args, **kwargs):
         if str(path) == '/opt/evorove/.env':
-            return 'A=secret-do-not-print\nB=""'
+            return required_values() + '\nSECRET_KEY=\nOPTIONAL=secret-do-not-print'
         if path.name == '.env.example':
             return 'A=\nB=\n'
         if str(path) == '/proc/meminfo':
@@ -147,7 +170,7 @@ def test_preflight_synthetic_files(monkeypatch, capsys):
     monkeypatch.setattr(checks, 'command', lambda args: {'systemctl': 'active', 'ufw': 'Status: active\n', 'ss': ''}[args[0]])
     assert checks.preflight() == 1
     output = capsys.readouterr().out
-    assert 'MISSING B' in output
+    assert 'MISSING SECRET_KEY' in output
     assert 'secret-do-not-print' not in output
     monkeypatch.setattr(Path, 'read_text', original)
 
@@ -158,7 +181,7 @@ def test_preflight_failures(monkeypatch, broken):
         if str(path) == '/proc/meminfo':
             return f'MemAvailable: {0 if broken == "memory" else 262144} kB\nSwapFree: {0 if broken == "swap" else 524288} kB\n'
         if path.name in ('.env', '.env.example'):
-            return 'A=synthetic'
+            return required_values()
         raise AssertionError('unexpected file access')
 
     monkeypatch.setattr(Path, 'read_text', read)
@@ -175,3 +198,25 @@ def test_preflight_failures(monkeypatch, broken):
 
     monkeypatch.setattr(checks, 'command', command)
     assert checks.preflight() == int(broken is not None)
+
+
+def test_smoke_paths_match_main_routes():
+    tree = ast.parse((checks.ROOT / 'app/main.py').read_text())
+    routes = set()
+    mounts = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if not isinstance(node.func.value, ast.Name) or node.func.value.id != 'app':
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        if node.func.attr in ('get', 'post'):
+            routes.add((node.args[0].value, node.func.attr.upper()))
+        elif node.func.attr == 'mount':
+            mounts.add(node.args[0].value)
+    for path, method, _ in checks.SMOKE_REQUESTS:
+        assert (path, method) in routes or (method == 'GET' and any(
+            path.startswith(mount + '/') for mount in mounts))
+    assert ('/faq', 'GET') in routes and ('/terms', 'GET') in routes
+    assert all(path != '/pricing' for path, _, _ in checks.SMOKE_REQUESTS)

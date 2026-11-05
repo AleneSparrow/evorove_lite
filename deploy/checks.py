@@ -15,6 +15,19 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
+# Production policy: keep required names here only (runtime has some dev defaults).
+REQUIRED_ENV = frozenset('''
+APP_BASE_URL SECRET_KEY DB_PATH ANTHROPIC_API_KEY ANTHROPIC_MODEL
+LEMONSQUEEZY_API_KEY LEMONSQUEEZY_WEBHOOK_SECRET LEMONSQUEEZY_STORE_ID
+LEMONSQUEEZY_VARIANT_STARTER LEMONSQUEEZY_VARIANT_PRO
+SYSTEM_SMTP_HOST SYSTEM_SMTP_PORT SYSTEM_SMTP_USER SYSTEM_SMTP_PASSWORD SYSTEM_SMTP_FROM
+'''.split())
+SMOKE_REQUESTS = (
+    ('/health', 'GET', (200,)), ('/', 'GET', (200,)),
+    ('/login', 'GET', (200,)), ('/faq', 'GET', (200,)), ('/terms', 'GET', (200,)),
+    ('/billing/webhook', 'POST', (400, 401)), ('/static/style.css', 'GET', (200,)),
+    ('/static/htmx.min.js', 'GET', (200,)),
+)
 TABLES = ('businesses', 'users', 'people', 'messages', 'payments', 'runs', 'billing_events')
 
 
@@ -31,8 +44,24 @@ def env_values(text):
     return values
 
 
-def missing_env(example, actual):
-    return sorted(key for key in env_values(example) if not env_values(actual).get(key, '').strip())
+def missing_env(actual):
+    values = env_values(actual)
+    return sorted(key for key in REQUIRED_ENV if not values.get(key, '').strip())
+
+
+def check_environment(example, actual):
+    values = env_values(actual)
+    missing = missing_env(actual)
+    for name in missing:
+        print('MISSING ' + name)
+    for name in sorted(env_values(example).keys() - REQUIRED_ENV):
+        if not values.get(name, '').strip():
+            print('INFO optional not set: ' + name)
+    token = bool(values.get('TELEGRAM_BOT_TOKEN', '').strip())
+    chat = bool(values.get('TELEGRAM_CHAT_ID', '').strip())
+    if token != chat:
+        print('FAIL TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set together')
+    return not missing and token == chat
 
 
 def command(args):
@@ -59,10 +88,7 @@ def preflight():
             failures.append(name)
 
     def environment():
-        missing = missing_env((ROOT / '.env.example').read_text(), Path('/opt/evorove/.env').read_text())
-        for name in missing:
-            print('MISSING ' + name)
-        return not missing
+        return check_environment((ROOT / '.env.example').read_text(), Path('/opt/evorove/.env').read_text())
 
     check('environment', environment)
     memory = {}
@@ -97,12 +123,7 @@ def smoke(base_url):
     if parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.query or parsed.fragment or parsed.username or parsed.password:
         raise ValueError('Invalid base URL')
     failures = 0
-    for path, method, allowed in (
-        ('/health', 'GET', (200,)), ('/', 'GET', (200,)),
-        ('/login', 'GET', (200,)), ('/pricing', 'GET', (200,)),
-        ('/billing/webhook', 'POST', (400, 401)), ('/static/style.css', 'GET', (200,)),
-        ('/static/htmx.min.js', 'GET', (200,)),
-    ):
+    for path, method, allowed in SMOKE_REQUESTS:
         try:
             request = Request(base_url.rstrip('/') + path, data=b'{}' if method == 'POST' else None,
                               headers={'Content-Type': 'application/json'}, method=method)
