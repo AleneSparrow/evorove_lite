@@ -1,4 +1,4 @@
-.PHONY: run test test-browser lint
+.PHONY: run test test-browser lint preflight smoke backup-check shellcheck
 run:
 	.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers --ssl-keyfile .local/key.pem --ssl-certfile .local/cert.pem --no-access-log
 test:
@@ -8,3 +8,15 @@ lint:
 
 test-browser:
 	.venv/bin/python -m pytest -q tests/browser -o norecursedirs=
+
+preflight:
+	./deploy/preflight.sh
+
+smoke:
+	./deploy/smoke.sh "$(BASE_URL)"
+
+backup-check:
+	./deploy/backup-check.sh
+
+shellcheck:
+	shellcheck deploy/*.sh
