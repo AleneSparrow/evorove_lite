@@ -152,7 +152,7 @@ def _offer_text(dna):
 
 def build_bundle(*, business, dna, mailbox=None, brief=None, users=(), suppressions=(),
                  board_people=(), board_touches=(), conversation_messages=(), board_notes=(),
-                 engine_leads=(), lead_leads=(), include_unboarded_leads=False):
+                 engine_leads=(), lead_leads=(), include_unboarded_leads=False, keep_imap_cursor=False):
     report = defaultdict(Counter)
     def record(table, reason, count=1):
         report[table][reason] += count
@@ -177,7 +177,8 @@ def build_bundle(*, business, dna, mailbox=None, brief=None, users=(), suppressi
         "imap_host": mailbox.get('imap_host'),
         "imap_port": int(mailbox.get('imap_port') or 993),
         "imap_user": mailbox.get('smtp_username'),
-        "imap_last_uid": mailbox.get('imap_last_uid'),
+        "imap_last_uid": mailbox.get('imap_last_uid') if keep_imap_cursor else None,
+        "imap_uidvalidity": mailbox.get('imap_uidvalidity') if keep_imap_cursor else None,
         "subscription_status": business.get("subscription_status") or "incomplete",
         "ls_customer_id": business.get("payment_customer_id"),
         "ls_subscription_id": business.get("payment_subscription_id"),
@@ -185,12 +186,13 @@ def build_bundle(*, business, dna, mailbox=None, brief=None, users=(), suppressi
         "payment_link": str(dna.get("payment", {}).get("payment_link") or "").strip(),
         "postal_address": str(mailbox.get("postal_address") or "").strip(),
         "sender_name": str(mailbox.get("from_name") or "").strip(),
-        "daily_cap": int(mailbox.get("daily_limit") or 20),
+        "daily_cap": max(1, min(20, int(mailbox.get("daily_limit") or 20))),
         "brief": _business_brief(dna, brief),
     }
     if int(mailbox.get('smtp_port') or 587) == 465:
         record('engine.email_connections', 'smtp_port_465_to_587')
     record('engine.email_connections', 'passwords_not_imported', int(bool(mailbox)))
+    record('engine.email_connections', 'imap_cursor_kept' if keep_imap_cursor else 'imap_cursor_reset', int(bool(mailbox)))
     target_users = tuple({
         "id": row["id"],
         "email": str(row.get("normalized_email") or row["email"]).strip().casefold(),
@@ -348,7 +350,7 @@ def build_bundle(*, business, dna, mailbox=None, brief=None, users=(), suppressi
                         tuple(target_people), tuple(target_messages), tuple(notes), dict(report))
 
 
-def read_sources(engine, crm, lead, business_id, *, include_unboarded_leads=False):
+def read_sources(engine, crm, lead, business_id, *, include_unboarded_leads=False, keep_imap_cursor=False):
     business = engine.one(
         "SELECT id,name,created_at,plan,subscription_status,payment_customer_id,"
         "payment_subscription_id,current_period_end FROM businesses WHERE id=%s", (business_id,))
@@ -371,6 +373,12 @@ def read_sources(engine, crm, lead, business_id, *, include_unboarded_leads=Fals
     mailbox = engine.one(
         "SELECT from_name,postal_address,daily_limit,smtp_host,smtp_port,smtp_username,imap_host,imap_port,imap_last_uid FROM email_connections WHERE business_id=%s",
         (business_id,)) if engine.has_table("email_connections") else None
+    if mailbox and keep_imap_cursor:
+        columns = {r['column_name'] for r in engine.all(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='email_connections'")}
+        if 'imap_uidvalidity' in columns:
+            mailbox['imap_uidvalidity'] = engine.one(
+                'SELECT imap_uidvalidity FROM email_connections WHERE business_id=%s', (business_id,))['imap_uidvalidity']
     suppressions = engine.all(
         "SELECT email,reason,suppressed_at FROM email_suppressions WHERE business_id=%s "
         "ORDER BY email", (business_id,)) if engine.has_table("email_suppressions") else ()
@@ -409,6 +417,7 @@ def read_sources(engine, crm, lead, business_id, *, include_unboarded_leads=Fals
         lead_leads=read_optional(lead, 'leads', business_id,
                                  ('id', 'name', 'email', 'normalized_email', 'payload', 'created_at', 'updated_at')),
         include_unboarded_leads=include_unboarded_leads,
+        keep_imap_cursor=keep_imap_cursor,
     )
 
     for source, prefix, tables in (
@@ -436,55 +445,87 @@ def read_optional(source, table, business_id, allowed):
                       ' FROM "' + table + '" WHERE business_id=%s ORDER BY id', (business_id,))
 
 
-def apply_bundle(db_path, bundle):
+class ReimportRefused(RuntimeError):
+    pass
+
+
+def apply_bundle(db_path, bundle, *, force_reimport=False):
     migrate(db_path)
-    b = bundle.business
+    imported_at = _timestamp(None)
     with connect(db_path) as db:
-        db.execute("BEGIN IMMEDIATE")
-        db.execute(
-            "INSERT INTO businesses(id,name,created_at,plan,subscription_status,ls_customer_id,"
-            "ls_subscription_id,offer_text,payment_link,postal_address,sender_name,daily_cap,brief) "
-            "VALUES (:id,:name,:created_at,:plan,:subscription_status,:ls_customer_id,"
-            ":ls_subscription_id,:offer_text,:payment_link,:postal_address,:sender_name,:daily_cap,:brief) "
-            "ON CONFLICT(id) DO UPDATE SET name=excluded.name,plan=excluded.plan,"
-            "subscription_status=excluded.subscription_status,ls_customer_id=excluded.ls_customer_id,"
-            "ls_subscription_id=excluded.ls_subscription_id,offer_text=excluded.offer_text,"
-            "payment_link=excluded.payment_link,postal_address=excluded.postal_address,"
-            "sender_name=excluded.sender_name,daily_cap=excluded.daily_cap,brief=excluded.brief", b)
-        fields = ('subscription_ends_at', 'smtp_host', 'smtp_port', 'smtp_user',
-                  'imap_host', 'imap_port', 'imap_user', 'imap_last_uid')
-        db.execute('UPDATE businesses SET ' + ','.join(name + '=:' + name for name in fields) + ' WHERE id=:id', b)
-        db.execute('INSERT OR IGNORE INTO legacy_business_map VALUES (?,?)', (b['id'], b['id']))
-        for row in bundle.notes:
-            db.execute("INSERT INTO log(business_id,person_id,event,detail,created_at,legacy_note_id) "
-                       "SELECT :business_id,:person_id,'note',:detail,:created_at,:source_id "
-                       "WHERE NOT EXISTS (SELECT 1 FROM log WHERE legacy_note_id=:source_id)", row)
+        db.execute('BEGIN IMMEDIATE')
+        active = db.execute('SELECT 1 FROM runs LIMIT 1').fetchone() or db.execute(
+            'SELECT 1 FROM messages WHERE imported_at IS NULL LIMIT 1').fetchone()
+        if active and not force_reimport:
+            raise ReimportRefused('Full import requires --force-reimport on a live database')
+
+        def insert(table, row):
+            # Table and column names come exclusively from this module's target schema.
+            columns = ','.join(row)
+            db.execute(f'INSERT INTO {table} ({columns}) VALUES (' + ','.join('?' for _ in row) +
+                       ') ON CONFLICT DO NOTHING', tuple(row.values()))
+
+        insert('businesses', bundle.business | {'history_imported_at': imported_at})
+        if not active:
+            # A pre-created empty profile still needs a cutoff; never advance it
+            # during a forced reimport of an already-live application's backlog.
+            db.execute('UPDATE businesses SET history_imported_at=COALESCE(history_imported_at,?) WHERE id=?',
+                       (imported_at, bundle.business['id']))
+        insert('legacy_business_map', {'old_business_id': bundle.business['id'], 'business_id': bundle.business['id']})
         for row in bundle.users:
-            db.execute(
-                "INSERT INTO users(id,email,password_hash,business_id,role,created_at) "
-                "VALUES (:id,:email,:password_hash,:business_id,:role,:created_at) "
-                "ON CONFLICT(id) DO UPDATE SET email=excluded.email,password_hash=excluded.password_hash,"
-                "business_id=excluded.business_id,role=excluded.role", row)
+            insert('users', row)
         for row in bundle.suppressions:
-            db.execute(
-                "INSERT INTO suppressions VALUES (:business_id,:email,:reason,:created_at) "
-                "ON CONFLICT(business_id,email) DO UPDATE SET reason=excluded.reason", row)
+            insert('suppressions', row)
         for row in bundle.people:
-            db.execute(
-                "INSERT INTO people(id,business_id,name,role,email,company,website,us_state,segment,pain,"
-                "evidence_quote,source_url,stage,last_move,created_at,updated_at) VALUES "
-                "(:id,:business_id,:name,:role,:email,:company,:website,:us_state,:segment,:pain,"
-                ":evidence_quote,:source_url,:stage,:last_move,:created_at,:updated_at) "
-                "ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,email=excluded.email,"
-                "company=excluded.company,website=excluded.website,us_state=excluded.us_state,"
-                "segment=excluded.segment,pain=excluded.pain,evidence_quote=excluded.evidence_quote,"
-                "source_url=excluded.source_url,stage=excluded.stage,last_move=excluded.last_move,"
-                "updated_at=excluded.updated_at", row)
+            insert('people', row)
         for row in bundle.messages:
-            db.execute(
-                "INSERT INTO messages(id,person_id,direction,subject,body,smtp_message_id,in_reply_to,"
-                "move,created_at) VALUES (:id,:person_id,:direction,:subject,:body,:smtp_message_id,"
-                ":in_reply_to,:move,:created_at) ON CONFLICT(id) DO NOTHING", row)
+            insert('messages', row | {'imported_at': imported_at, 'reply_processed': 1})
+        for row in bundle.notes:
+            insert('log', {key: value for key, value in row.items() if key != 'source_id'} |
+                   {'event': 'note', 'legacy_note_id': row['source_id']})
+
+
+def read_suppressions(sources, business_id):
+    rows, report = [], {}
+    for source, prefix in zip(sources, ('engine', 'crm', 'lead')):
+        for table in ('email_suppressions', 'suppression_entries', 'suppressions'):
+            counts = Counter(read=0, transfer=0, skip=0)
+            report[prefix + '.' + table] = counts
+            if not source.has_table(table):
+                counts['source_absent'] = 1
+                continue
+            columns = {r['column_name'] for r in source.all(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=%s", (table,))}
+            allowed = ('email', 'normalized_email', 'value', 'reason', 'suppressed_at', 'created_at')
+            selected = [name for name in allowed if name in columns]
+            if 'business_id' not in columns or not selected:
+                raise RuntimeError('Unsupported suppression schema')
+            records = source.all('SELECT ' + ','.join('"' + name + '"' for name in selected) +
+                                 ' FROM "' + table + '" WHERE business_id=%s', (business_id,))
+            counts['read'] = len(records)
+            for row in records:
+                email = str(row.get('normalized_email') or row.get('email') or row.get('value') or '').strip().casefold()
+                if '@' not in email:
+                    counts['skip'] += 1
+                    counts['skip_no_email'] += 1
+                    continue
+                rows.append(dict(business_id=business_id, email=email, reason=row.get('reason') or 'legacy',
+                                 created_at=_timestamp(row.get('suppressed_at') or row.get('created_at'))))
+                counts['transfer'] += 1
+    return tuple(rows), report
+
+
+def apply_suppressions(db_path, business_id, rows):
+    # No migrations, profile changes, or history writes in the final delta pass.
+    with connect(db_path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        mapping = db.execute('SELECT business_id FROM legacy_business_map WHERE old_business_id=?',
+                             (business_id,)).fetchone()
+        if not mapping:
+            raise RuntimeError('Client-zero import mapping is required')
+        for row in rows:
+            db.execute('INSERT OR IGNORE INTO suppressions VALUES (?,?,?,?)',
+                       (mapping['business_id'], row['email'], row['reason'], row['created_at']))
 
 
 def _required_environment():
@@ -513,22 +554,41 @@ def main(argv=None):
     mode.add_argument("--dry-run", action="store_true", help="print counts only (default)")
     mode.add_argument("--apply", action="store_true", help="write to DB_PATH")
     parser.add_argument("--include-unboarded-leads", action="store_true")
+    parser.add_argument('--keep-imap-cursor', action='store_true', help='retain the old mailbox cursor explicitly')
+    parser.add_argument('--suppressions-only', action='store_true', help='only read stop lists; combine with --apply to write')
+    parser.add_argument('--force-reimport', action='store_true', help='allow full import into a live DB; preserve existing rows')
     args = parser.parse_args(argv)
     sources = []
     try:
         env = _required_environment()
         for name in SOURCE_ENV:
             sources.append(PostgresSource(env[name]))
-        bundle = read_sources(*sources, env["CLIENT_ZERO_BUSINESS_ID"],
-                              include_unboarded_leads=args.include_unboarded_leads)
-        _print_counts(bundle)
-        if args.apply:
-            db_path = os.environ.get("DB_PATH")
-            if not db_path:
-                raise RuntimeError("DB_PATH is required with --apply")
-            apply_bundle(db_path, bundle)
+        if args.suppressions_only:
+            rows, report = read_suppressions(sources, env['CLIENT_ZERO_BUSINESS_ID'])
+            for table, counts in sorted(report.items()):
+                print(table + ': ' + ', '.join(f'{reason}={count}' for reason, count in sorted(counts.items())))
+            if args.apply:
+                if not os.environ.get('DB_PATH'):
+                    raise RuntimeError('DB_PATH is required with --apply')
+                apply_suppressions(os.environ['DB_PATH'], env['CLIENT_ZERO_BUSINESS_ID'], rows)
+        else:
+            bundle = read_sources(*sources, env["CLIENT_ZERO_BUSINESS_ID"],
+                                  include_unboarded_leads=args.include_unboarded_leads,
+                                  keep_imap_cursor=args.keep_imap_cursor)
+            _print_counts(bundle)
+            if args.apply:
+                db_path = os.environ.get("DB_PATH")
+                if not db_path:
+                    raise RuntimeError("DB_PATH is required with --apply")
+                if args.force_reimport:
+                    apply_bundle(db_path, bundle, force_reimport=True)
+                else:
+                    apply_bundle(db_path, bundle)
     except Exception as exc:
-        print(f"Import failed: {type(exc).__name__}", file=sys.stderr)
+        if isinstance(exc, ReimportRefused):
+            print('Import refused: live database; use --force-reimport to preserve existing rows', file=sys.stderr)
+        else:
+            print(f"Import failed: {type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
         for source in sources:
