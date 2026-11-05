@@ -1,5 +1,6 @@
 """Branded 404/500 pages, static maintenance page, and local frontend assets."""
 import re
+import traceback
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -33,14 +34,16 @@ def test_missing_page_is_branded_html(client):
     assert '<html' not in fragment.text.lower()
 
 
-def test_unhandled_error_is_a_calm_page_without_the_cause(settings):
+def test_unhandled_error_is_a_calm_page_without_the_cause(settings, caplog):
     # ServerErrorMiddleware still re-raises after rendering, so the test client
     # must keep the response instead of surfacing the exception.
     app = create_app(settings, scheduler_enabled=False)
 
+    private_value = 'smtp-password-should-not-leak'
+
     @app.get('/__error_probe')
     def error_probe():
-        raise RuntimeError('smtp-password-should-not-leak')
+        raise RuntimeError(private_value)
 
     with TestClient(app, base_url='https://testserver', follow_redirects=False, raise_server_exceptions=False) as browser:
         failed = browser.get('/__error_probe')
@@ -57,6 +60,12 @@ def test_unhandled_error_is_a_calm_page_without_the_cause(settings):
         denied = browser.post('/signup', data={'email': 'x@example.com'})
         assert denied.status_code == 403
         assert denied.headers['content-type'].startswith('application/json')
+
+    records = [record for record in caplog.records if record.name == 'app.main']
+    assert records and records[0].exc_info is not None
+    assert any(frame.name == 'error_probe' for frame in traceback.extract_tb(records[0].exc_info[2]))
+    assert 'smtp-password-should-not-leak' not in caplog.text
+    assert 'Unhandled RuntimeError' in caplog.text
 
 
 def test_maintenance_page_is_static_and_makes_no_time_promise(client):

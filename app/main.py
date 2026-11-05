@@ -72,7 +72,10 @@ def create_app(settings=None, *, scheduler_enabled=True):
 
     @app.exception_handler(Exception)
     async def unhandled_error(request: Request, exc: Exception):
-        log.error("Unhandled %s", type(exc).__name__)
+        # Keep stack locations, but exception messages may contain provider data/secrets.
+        safe_error = RuntimeError("Exception details redacted")
+        log.error("Unhandled %s", type(exc).__name__,
+                  exc_info=(RuntimeError, safe_error, exc.__traceback__))
         return error_page(request, 500)
 
     @app.middleware("http")

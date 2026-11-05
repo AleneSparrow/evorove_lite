@@ -67,7 +67,7 @@ def test_migrations_and_health(client, settings):
     with connect(settings.db_path) as db:
         assert db.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert db.execute('PRAGMA foreign_keys').fetchone()[0] == 1
-        assert db.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 4
+        assert db.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 5
 
 
 def test_health_reports_last_success_and_search_freshness(client, settings):
@@ -408,5 +408,5 @@ def test_env_example_has_only_empty_values():
     from app.db import ROOT
     entries = (ROOT / '.env.example').read_text().splitlines()
     assert {'MARKET_SIGNALS=', 'PER_RUN_TOKEN_BUDGET='} <= set(entries)
-    assert len(entries) == 23
+    assert len(entries) == 24
     assert all(line.endswith('=') and line.count('=') == 1 for line in entries)

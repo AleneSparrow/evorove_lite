@@ -217,3 +217,70 @@ def test_unboarded_requires_flag_and_deduplicates(capsys):
     output = capsys.readouterr().out
     assert 'skip_requires_include_unboarded_leads=1' in output
     assert '@' not in output and BUSINESS['name'] not in output
+
+
+def test_cli_passes_unboarded_flag_without_typeerror(monkeypatch, capsys):
+    from scripts import import_from_railway as importer
+    calls = []
+    monkeypatch.setattr(importer, '_required_environment', lambda: dict.fromkeys(
+        (*importer.SOURCE_ENV, 'CLIENT_ZERO_BUSINESS_ID'), 'synthetic'))
+    monkeypatch.setattr(importer, 'PostgresSource', lambda _: types.SimpleNamespace(close=lambda: None))
+
+    # Explicit production signature, rather than a stale *args-only mock.
+    def source(engine, crm, lead, business_id, *, include_unboarded_leads=False):
+        calls.append(include_unboarded_leads)
+        return bundle()
+
+    monkeypatch.setattr(importer, 'read_sources', source)
+    assert importer.main(['--dry-run']) == 0
+    assert importer.main(['--dry-run', '--include-unboarded-leads']) == 0
+    assert calls == [False, True]
+    assert 'Import failed' not in capsys.readouterr().err
+
+
+def test_read_sources_sqlite_stubs():
+    import sqlite3
+    from scripts.import_from_railway import read_sources
+
+    class Source:
+        def __init__(self):
+            self.db = sqlite3.connect(':memory:')
+            self.db.row_factory = sqlite3.Row
+
+        def has_table(self, table):
+            return bool(self.one('SELECT name FROM sqlite_master WHERE name=%s', (table,)))
+
+        def all(self, sql, params=()):
+            if 'information_schema.columns' in sql:
+                return tuple({'column_name': r[1]} for r in self.db.execute(f'PRAGMA table_info("{params[0]}")'))
+            return tuple(dict(r) for r in self.db.execute(sql.replace('%s', '?'), params))
+
+        def one(self, sql, params=()):
+            return next(iter(self.all(sql, params)), None)
+
+    engine, crm, lead = Source(), Source(), Source()
+    try:
+        engine.db.executescript('''
+            CREATE TABLE staff_users(id,email,normalized_email,password_hash,created_at,business_id);
+            CREATE TABLE businesses(id,name,created_at,plan,subscription_status,payment_customer_id,payment_subscription_id,current_period_end);
+            INSERT INTO businesses VALUES ('zero','Synthetic','2026-01-01','pro','active',NULL,NULL,'2027-01-01');
+            CREATE TABLE business_dna(business_id,configuration,active,version);
+            INSERT INTO business_dna VALUES ('zero','{}',1,1);
+            CREATE TABLE leads(id,business_id,name,email,normalized_email,metadata,created_at,updated_at);
+            INSERT INTO leads VALUES ('lead','zero','Test','test@example.test',NULL,'{}',NULL,NULL);
+            INSERT INTO leads VALUES ('foreign','other','Other','other@example.test',NULL,'{}',NULL,NULL);
+            CREATE TABLE conversations(id,business_id,lead_id,external_session_id,channel);
+            INSERT INTO conversations VALUES ('c','zero','lead',NULL,'email');
+            CREATE TABLE conversation_messages(id,business_id,conversation_id,sequence_number,direction,text,external_message_id,metadata,created_at);
+            INSERT INTO conversation_messages VALUES ('m','zero','c',1,'inbound','Full body','<id@example.test>','{"subject":"Subject"}',NULL);
+        ''')
+        result = read_sources(engine, crm, lead, 'zero', include_unboarded_leads=True)
+        assert len(result.people) == 1 and result.people[0]['email'] == 'test@example.test'
+        assert result.messages[0]['subject'] == 'Subject'
+        assert result.messages[0]['body'] == 'Full body'
+        assert result.report['crm.board_notes']['source_absent'] == 1
+        assert result.report['lead.leads']['source_absent'] == 1
+        assert result.report['engine.leads']['read'] == 1
+    finally:
+        for source in (engine, crm, lead):
+            source.db.close()

@@ -292,8 +292,11 @@ def build_bundle(*, business, dna, mailbox=None, brief=None, users=(), suppressi
             continue
         metadata = _json(row.get('metadata'))
         external = row.get('external_message_id') or ''
-        smtp_id = metadata.get('smtp_message_id') or (external if external.startswith('<') else None)
-        identity = (pid, direction, smtp_id or body)
+        smtp_id = metadata.get('smtp_message_id') or (external if external and not external.startswith('cold:') else None)
+        if external.startswith('cold:') and '\n\n' in body:
+            seeded_subject, body = body.split('\n\n', 1)
+            metadata.setdefault('subject', seeded_subject)
+        identity = (pid, direction, smtp_id or str(row['id']))
         if identity in seen_messages:
             record('engine.conversation_messages', 'skip_duplicate')
             continue
@@ -323,7 +326,7 @@ def build_bundle(*, business, dna, mailbox=None, brief=None, users=(), suppressi
         if touch['touch_id'] in full_by_touch or any(
             m['person_id'] == pid and m['direction'] == direction and
             (payload.get('smtp_message_id') and payload['smtp_message_id'] == m['smtp_message_id']
-             or m['body'].startswith(body)) for m in target_messages):
+             or m['body'] == body or len(body) >= 400 and m['body'].startswith(body)) for m in target_messages):
             record('crm.board_touches', 'skip_full_message_or_duplicate')
             continue
         target_messages.append(dict(id='legacy:board:' + touch['touch_id'], person_id=pid,
@@ -383,7 +386,7 @@ def read_sources(engine, crm, lead, business_id, *, include_unboarded_leads=Fals
         "SELECT what_we_sell,who_may_fit,business_archetype FROM briefs "
         "WHERE business_id=%s ORDER BY created_at DESC,id DESC LIMIT 1", (business_id,)
     ) if lead.has_table("briefs") else None
-    return build_bundle(
+    bundle = build_bundle(
         business=business,
         dna=dna_row["configuration"],
         mailbox=mailbox,
@@ -394,7 +397,7 @@ def read_sources(engine, crm, lead, business_id, *, include_unboarded_leads=Fals
         board_touches=touches,
         conversation_messages=engine.all(
             "SELECT m.id,m.conversation_id,m.sequence_number,m.direction,m.text,m.external_message_id,"
-            "m.metadata,m.created_at,COALESCE(l.email,c.external_session_id) AS email "
+            "m.metadata,m.created_at,COALESCE(NULLIF(TRIM(l.email),''),c.external_session_id) AS email "
             "FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id AND c.business_id=m.business_id "
             "LEFT JOIN leads l ON l.id=c.lead_id AND l.business_id=c.business_id "
             "WHERE m.business_id=%s AND c.channel='email' ORDER BY m.created_at,m.id", (business_id,)
@@ -407,6 +410,18 @@ def read_sources(engine, crm, lead, business_id, *, include_unboarded_leads=Fals
                                  ('id', 'name', 'email', 'normalized_email', 'payload', 'created_at', 'updated_at')),
         include_unboarded_leads=include_unboarded_leads,
     )
+
+    for source, prefix, tables in (
+        (engine, 'engine', ('email_connections', 'email_suppressions', 'conversation_messages', 'leads')),
+        (crm, 'crm', ('board_people', 'board_touches', 'board_notes')),
+        (lead, 'lead', ('leads',)),
+    ):
+        for table in tables:
+            if not source.has_table(table):
+                bundle.report[prefix + '.' + table]['source_absent'] = 1
+    bundle.report['engine.business_dna'] = Counter(read=1, transfer=1)
+    bundle.report['lead.briefs'] = Counter(read=int(bool(brief_row)), transfer=int(bool(brief_row)))
+    return bundle
 
 
 def read_optional(source, table, business_id, allowed):
@@ -483,7 +498,9 @@ def _required_environment():
 def _print_counts(bundle):
     for table, counts in sorted(bundle.report.items()):
         # Only fixed table/reason labels and counters, never source data.
-        print(table + ': ' + ', '.join(f'{reason}={count}' for reason, count in sorted(counts.items())))
+        summary = {'read': counts.get('read', 0), 'transfer': counts.get('transfer', 0),
+                   'skip': sum(count for reason, count in counts.items() if reason.startswith('skip_'))}
+        print(table + ': ' + ', '.join(f'{reason}={count}' for reason, count in sorted((counts | summary).items())))
     for table, count in bundle.counts().items():
         print(f'target.{table}: transfer={count}')
     if bundle.business['subscription_status'] not in STATUSES:
