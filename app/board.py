@@ -73,6 +73,15 @@ def save_settings(settings, business_id, fields):
         if password:
             values[protocol + '_password_enc'] = encrypt_password(settings, password)
     with connect(settings.db_path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        previous = db.execute('SELECT * FROM businesses WHERE id=?', (business_id,)).fetchone()
+        if previous:
+            def changed(key):
+                return (previous[key] or '').strip() != values[key]
+            if any(changed(key) for key in ('imap_host', 'imap_user')):
+                values.update(imap_last_uid=None, imap_uidvalidity=None)
+            if any(changed(key) for key in ('smtp_host', 'smtp_user', 'imap_host', 'imap_user')):
+                values.update(mailbox_first_sent_at=None, mailbox_generation=previous['mailbox_generation'] + 1)
         db.execute('UPDATE businesses SET ' + ','.join(key + '=?' for key in values) + ' WHERE id=?', (*values.values(), business_id))
 
 

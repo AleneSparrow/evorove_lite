@@ -173,7 +173,7 @@ def test_import_gaps_and_idempotency(tmp_path):
              {'id': 'note-2', 'person_id': 'missing-person', 'body': 'Orphan'})
     result = build_bundle(business=BUSINESS | {'current_period_end': '2027-01-01'}, dna=DNA,
         mailbox=mailbox, board_people=PEOPLE, board_touches=touches,
-        conversation_messages=full + full, board_notes=notes)
+        conversation_messages=full + full, board_notes=notes, keep_imap_cursor=True)
     assert result.business['smtp_port'] == 587
     assert result.business['imap_user'] == 'sender@example.test'
     assert result.business['imap_last_uid'] == 77
@@ -227,7 +227,7 @@ def test_cli_passes_unboarded_flag_without_typeerror(monkeypatch, capsys):
     monkeypatch.setattr(importer, 'PostgresSource', lambda _: types.SimpleNamespace(close=lambda: None))
 
     # Explicit production signature, rather than a stale *args-only mock.
-    def source(engine, crm, lead, business_id, *, include_unboarded_leads=False):
+    def source(engine, crm, lead, business_id, *, include_unboarded_leads=False, keep_imap_cursor=False):
         calls.append(include_unboarded_leads)
         return bundle()
 

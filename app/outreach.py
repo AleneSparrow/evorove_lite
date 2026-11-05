@@ -366,13 +366,43 @@ def build_message(business, person, subject, body, headers):
     return message
 
 
-def deliver(settings, business, person, subject, body, move, *, send, headers=None):
+def mailbox_daily_limit(business, moment):
+    first = business['mailbox_first_sent_at']
+    days = max(0, (moment - datetime.fromisoformat(first)).days) if first else 0
+    return min(business['daily_cap'] or 20, 10 + 5 * days)
+
+
+def reserve_send(settings, business, moment):
+    """Count in-flight SMTP too: two concurrent jobs cannot overshoot the cap."""
+    with connect(settings.db_path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        current = db.execute('SELECT * FROM businesses WHERE id=?', (business['id'],)).fetchone()
+        if current['mailbox_generation'] != business['mailbox_generation']:
+            return None
+        day = guards._owner_day_start(settings, moment)
+        used = db.execute('SELECT count(*) FROM mailbox_sends WHERE business_id=? AND generation=? AND created_at>=?',
+                          (business['id'], current['mailbox_generation'], day)).fetchone()[0]
+        if used >= mailbox_daily_limit(current, moment):
+            db.execute("INSERT INTO log(business_id,event,detail,created_at) VALUES (?,'send_blocked','mailbox_daily_cap',?)",
+                       (business['id'], now()))
+            return None
+        reservation = str(uuid4())
+        db.execute('INSERT INTO mailbox_sends VALUES (?,?,?,?)',
+                   (reservation, business['id'], current['mailbox_generation'], moment.isoformat()))
+        return reservation
+
+
+def deliver(settings, business, person, subject, body, move, *, send, headers=None, now_utc=None):
     """Send one letter and record it, or record why it did not go. Returns the
     stored message id, or None when SMTP refused."""
     person_id, address = person['id'], person['email']
     full = body + guards.footer(business['id'], person_id, settings=settings)
     message = build_message(business, person, subject, full,
                             {**guards.unsubscribe_headers(settings, business['id'], person_id), **(headers or {})})
+    moment = now_utc or datetime.now(timezone.utc)
+    reservation = reserve_send(settings, business, moment)
+    if reservation is None:
+        return None
     try:
         send(mailbox(settings, business, 'smtp'), message)
     except Exception as exc:
@@ -390,6 +420,7 @@ def deliver(settings, business, person, subject, body, move, *, send, headers=No
         else:
             event = 'smtp_error'
         with connect(settings.db_path) as db:
+            db.execute('DELETE FROM mailbox_sends WHERE id=?', (reservation,))
             db.execute('INSERT INTO log(business_id,person_id,event,detail,created_at) VALUES (?,?,?,?,?)',
                        (business['id'], person_id, event, address.lower(), now()))
         if event == 'bounce':
@@ -398,6 +429,8 @@ def deliver(settings, business, person, subject, body, move, *, send, headers=No
     message_id = str(uuid4())
     stage = {GREET: 'in_progress', OFFER: 'offer_made'}.get(move)
     with connect(settings.db_path) as db:
+        db.execute('UPDATE businesses SET mailbox_first_sent_at=COALESCE(mailbox_first_sent_at,?) WHERE id=? AND mailbox_generation=?',
+                   (moment.isoformat(), business['id'], business['mailbox_generation']))
         db.execute('INSERT INTO messages(id,person_id,direction,subject,body,smtp_message_id,in_reply_to,move,created_at)'
                    " VALUES (?,?,'out',?,?,?,?,?,?)",
                    (message_id, person_id, subject, full, message['Message-ID'],
@@ -443,7 +476,7 @@ def send_first_letters(business_id: str, *, settings=None, send=None, now_utc=No
                            (business_id, person['id'], 'send_blocked', 'unsafe_pain', now()))
             continue
         subject, body = letter
-        if deliver(settings, business, person, subject, body, GREET, send=send):
+        if deliver(settings, business, person, subject, body, GREET, send=send, now_utc=moment):
             sent += 1
     return sent
 
@@ -457,10 +490,11 @@ def read_cursor(settings, business_id):
     return row['imap_last_uid'] if row else None
 
 
-def write_cursor(settings, business_id, uid, uidvalidity):
+def write_cursor(settings, business_id, uid, uidvalidity, generation=None):
     with connect(settings.db_path) as db:
-        db.execute('UPDATE businesses SET imap_last_uid=?,imap_uidvalidity=? WHERE id=?',
-                   (uid, uidvalidity, business_id))
+        db.execute('UPDATE businesses SET imap_last_uid=?,imap_uidvalidity=? WHERE id=?'
+                   + (' AND mailbox_generation=?' if generation is not None else ''),
+                   (uid, uidvalidity, business_id, generation) if generation is not None else (uid, uidvalidity, business_id))
 
 
 def match_person(db, business_id, message):
@@ -507,7 +541,7 @@ def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=
             break  # retried on the next sweep; the cursor is not advanced past it
         cursor = message['uid']
     if cursor is not None and (cursor != last_uid or uidvalidity != last_uidvalidity):
-        write_cursor(settings, business_id, cursor, uidvalidity)
+        write_cursor(settings, business_id, cursor, uidvalidity, business['mailbox_generation'])
     answer_pending_replies(settings, business, send=send, llm=llm, now_utc=moment)
     return received
 
@@ -578,7 +612,7 @@ def attempt_reply(settings, business, person, *, in_reply_to, references, subjec
         reply_subject = 'Re: ' + reply_subject
     deliver(settings, business, person, reply_subject[:255],
             compose_reply(business, person, text, analysis, move, llm=llm), move, send=send,
-            headers={'In-Reply-To': in_reply_to, 'References': references[-900:]})
+            headers={'In-Reply-To': in_reply_to, 'References': references[-900:]}, now_utc=moment)
     return True
 
 
@@ -590,6 +624,9 @@ def pending_replies(db, business_id):
     return [dict(row) for row in db.execute(
         "SELECT m.* FROM messages m JOIN people p ON p.id=m.person_id "
         "WHERE p.business_id=? AND m.direction='in' AND p.stage NOT IN ('done','lost') "
+        "AND m.reply_processed=0 AND m.imported_at IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM businesses b WHERE b.id=p.business_id "
+        "AND julianday(m.created_at)<julianday(b.history_imported_at)) "
         'AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.person_id=m.person_id '
         "AND o.direction='out' AND o.in_reply_to=m.smtp_message_id) "
         'ORDER BY m.created_at,m.id', (business_id,))]

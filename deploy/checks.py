@@ -22,7 +22,12 @@ LEMONSQUEEZY_API_KEY LEMONSQUEEZY_WEBHOOK_SECRET LEMONSQUEEZY_STORE_ID
 LEMONSQUEEZY_VARIANT_STARTER LEMONSQUEEZY_VARIANT_PRO
 SYSTEM_SMTP_HOST SYSTEM_SMTP_PORT SYSTEM_SMTP_USER SYSTEM_SMTP_PASSWORD SYSTEM_SMTP_FROM
 '''.split())
-OPTIONAL_ENV = frozenset({'LEGACY_ACCOUNT_SECURITY_ENCRYPTION_KEY', 'EXTRA_ALLOWED_ORIGINS'})
+OPTIONAL_ENV = frozenset({
+    'LEGACY_ACCOUNT_SECURITY_ENCRYPTION_KEY', 'EXTRA_ALLOWED_ORIGINS',
+    'OPERATOR_NAME', 'OPERATOR_ADDRESS',
+})
+# Empty operator identity is a warning. It does not fail preflight.
+WARN_IF_EMPTY = frozenset({'OPERATOR_NAME', 'OPERATOR_ADDRESS'})
 SMOKE_REQUESTS = (
     ('/health', 'GET', (200,)), ('/', 'GET', (200,)),
     ('/login', 'GET', (200,)), ('/faq', 'GET', (200,)), ('/terms', 'GET', (200,)),
@@ -57,7 +62,10 @@ def check_environment(example, actual):
         print('MISSING ' + name)
     for name in sorted((env_values(example).keys() | OPTIONAL_ENV) - REQUIRED_ENV):
         if not values.get(name, '').strip():
-            print('INFO optional not set: ' + name)
+            if name in WARN_IF_EMPTY:
+                print('WARN ' + name + ' is empty')
+            else:
+                print('INFO optional not set: ' + name)
     token = bool(values.get('TELEGRAM_BOT_TOKEN', '').strip())
     chat = bool(values.get('TELEGRAM_CHAT_ID', '').strip())
     if token != chat:
