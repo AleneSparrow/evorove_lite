@@ -10,8 +10,8 @@ Cloudflare, а на сервере хранится только токен в �
 3. Ограничьте доступ к файлу:
 
    ```bash
-   sudo chown root:cloudflared /etc/cloudflared/evorove.token
-   sudo chmod 0640 /etc/cloudflared/evorove.token
+   sudo chown cloudflared:cloudflared /etc/cloudflared/evorove.token
+   sudo chmod 0600 /etc/cloudflared/evorove.token
    ```
 
 4. После запуска приложения включите tunnel:

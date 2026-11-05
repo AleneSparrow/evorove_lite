@@ -80,8 +80,8 @@ sudo chmod 0640 /opt/evorove/.env
 
 ```bash
 sudoedit /etc/cloudflared/evorove.token
-sudo chown root:cloudflared /etc/cloudflared/evorove.token
-sudo chmod 0640 /etc/cloudflared/evorove.token
+sudo chown cloudflared:cloudflared /etc/cloudflared/evorove.token
+sudo chmod 0600 /etc/cloudflared/evorove.token
 ```
 
 Токен является секретом. Не передавайте его аргументом команды и не сохраняйте
@@ -120,14 +120,17 @@ sudo systemd-run --wait --pipe --collect \
 
 ## 6. Первый запуск и проверка
 
-Запускайте компоненты по порядку:
+Запускайте компоненты по порядку (подробнее о проверках — раздел 11):
 
 ```bash
+sudo systemctl start litestream cloudflared
+sudo make -C /opt/evorove preflight
 sudo systemctl start evorove
-curl --fail --silent --show-error http://127.0.0.1:8000/health
-sudo systemctl start litestream
-sudo systemctl start cloudflared
+make -C /opt/evorove smoke BASE_URL=https://YOUR_DOMAIN
 ```
+
+До старта приложения tunnel может временно возвращать 502, а Litestream —
+ожидать появления файла базы. Сначала убедитесь, что оба сервиса активны.
 
 Проверьте состояния и последние журналы:
 
@@ -148,8 +151,9 @@ Cloudflare, при этом прямого входящего доступа к 
 sudo -u evorove git -C /opt/evorove pull --ff-only
 sudo -u evorove /opt/evorove/.venv/bin/pip install \
   --requirement /opt/evorove/requirements.txt
+sudo make -C /opt/evorove preflight
 sudo systemctl restart evorove
-curl --fail --silent --show-error http://127.0.0.1:8000/health
+make -C /opt/evorove smoke BASE_URL=https://YOUR_DOMAIN
 ```
 
 Если менялись файлы в `deploy/`, сначала повторно выполните
@@ -275,3 +279,78 @@ curl --fail --silent --show-error http://127.0.0.1:8000/health
 Если `/health` не отвечает и после откат кода не помог, не трогайте базу —
 соберите `journalctl` (команда выше) и восстановление из R2 делайте только по
 инструкции в разделе 8, с резервной копией старых файлов.
+
+## 11. Автоматические проверки деплоя
+
+Скрипты запускаются из `/opt/evorove`, возвращают 0 при успехе и ненулевой код
+при ошибке. Нужен Python 3; shellcheck нужен только на машине разработки.
+Скрипты не печатают значения переменных, тела HTTP-ответов и вывод Litestream.
+`.env` не исполняется как shell-код. Проверка присутствия читает его только на
+сервере; все имена из `.env.example` считаются обязательными, включая настройки
+интеграций. Проверяется только непустое значение, а не валидность или доступность
+ключей. Подставлять фиктивные значения ради прохождения проверки не следует.
+
+### Перед стартом или перезапуском приложения
+
+На первом запуске сначала запустите зависимости. Перед первым стартом и
+каждым обновлением приложения:
+
+```bash
+sudo systemctl start litestream cloudflared
+sudo make -C /opt/evorove preflight
+sudo systemctl restart evorove
+```
+
+`preflight.sh` проверяет доступную RAM ≥128 МиБ, свободный swap ≥256 МиБ,
+свободное место ≥1 ГиБ на файловых системах кода и базы, наличие бинарников и
+активность обоих сервисов, режим токена 0600, активность UFW и адреса TCP-порта
+8000. При остановленном приложении отсутствие слушателя допустимо; каждый
+существующий слушатель обязан иметь адрес строго `127.0.0.1:8000`.
+Проверка запускается вручную с root-правами и не является `ExecStartPre`:
+это позволяет избежать зависимости старта приложения от сервисов, которые
+сами запускаются после него. Владельцем токена должен быть `cloudflared`,
+чтобы сервис мог читать файл с режимом 0600 (см. раздел 4).
+
+### После старта и каждого обновления
+
+```bash
+make -C /opt/evorove smoke BASE_URL=https://YOUR_DOMAIN
+# Для проверки приложения напрямую на сервере:
+/opt/evorove/deploy/smoke.sh http://127.0.0.1:8000
+```
+
+Проверяются `/health`, `/`, `/login`, `/pricing`, CSS и JS, а также POST
+`/billing/webhook` без подписи: допустимы только 400/401. Код 503 означает,
+что billing не настроен, и тоже считается ошибкой. Каждый ответ проверяется
+на признаки traceback/внутренней ошибки. Проверка не создаёт платежей.
+
+### Проверка восстановления бэкапа
+
+Запускайте после первого появления реплики в R2, после изменения настройки
+репликации и регулярно, например раз в неделю. Передайте секреты через
+systemd EnvironmentFile, как для самого Litestream:
+
+```bash
+sudo systemd-run --wait --pipe --collect \
+  --property=User=evorove --property=Group=evorove \
+  --property=EnvironmentFile=/etc/evorove/litestream.env \
+  /usr/bin/make -C /opt/evorove backup-check
+```
+
+`backup-check.sh` восстанавливает последнюю доступную копию в закрытый
+временный каталог, выполняет `PRAGMA integrity_check` и сравнивает число строк
+в `businesses`, `users`, `people`, `messages`, `payments`, `runs`, `billing_events`
+с согласованным снимком рабочей SQLite-базы в режиме чтения, с учётом WAL.
+Временный каталог удаляется и при обычной ошибке восстановления или проверки.
+Рабочая база не заменяется. Принудительное завершение процесса SIGKILL может
+оставить временный каталог `evorove-backup-*` для ручного удаления.
+
+Расхождение считается ошибкой и выводит только имя таблицы и два числа.
+На работающем сайте причиной может быть задержка репликации или новые записи:
+повторите проверку в спокойное время, а для строгого сравнения остановите только
+`evorove`, дождитесь отправки оставшегося WAL через работающий Litestream и
+повторите проверку. Совпадение числа строк не доказывает равенство содержимого.
+Для другой установки доступны `--db-path PATH` и `--config PATH`.
+
+Локальные проверки перед коммитом: `make test` и `make shellcheck`.
+Синтаксис restore соответствует [документации Litestream](https://litestream.io/reference/restore/).
