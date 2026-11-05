@@ -252,5 +252,12 @@ a.button:not(.secondary):hover{background:#e04417;color:#070604}
 .app-header nav a{flex:none}
 }
 @media(max-width:600px){.ev-hero-h1{font-size:clamp(84px,26vw,140px) !important}.ev-board-scale{zoom:.24}.page-heading{align-items:flex-start}}
+@media(max-width:388px){.ev-board-scale{zoom:calc((100vw - 48px) / 1440px)}}
 @media(max-width:360px){.ev-board-scale{zoom:.19}}
 @media(prefers-reduced-motion:reduce){.ev-dot,.ev-ring,.ev-sweep,.ev-blip{animation:none}}
+body.error-page{min-height:100vh;display:flex;flex-direction:column}
+body.error-page main{flex:1;display:flex;align-items:center;width:100%}
+.error-panel{display:flex;flex-direction:column;align-items:flex-start;gap:16px;max-width:100%;min-width:0}
+.error-panel h1,.error-panel p{margin:0;max-width:100%}
+.error-panel h1{overflow-wrap:break-word}
+.error-panel p{max-width:36ch;color:var(--muted)}
