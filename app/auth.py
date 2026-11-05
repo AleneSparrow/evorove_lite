@@ -72,18 +72,50 @@ def verify_legacy_password(password, stored):
     return hmac.compare_digest(candidate, expected)
 
 
+RATE_LIMIT_CAPS = (30, 8)  # per ip, per email
+
+
+def rate_limit_keys(ip, email, kind):
+    return [digest(f"{kind}:ip:{ip}"), digest(f"{kind}:email:{email}")]
+
+
 def rate_limit(settings, ip, email, kind):
+    """Count this attempt, win or lose, and block once the window's cap is exceeded.
+    Used by signup and password reset, where every request -- not just a failure --
+    is itself the thing worth limiting."""
     stamp = int(time.time())
-    keys = [digest(f"{kind}:ip:{ip}"), digest(f"{kind}:email:{email}")]
     limited = False
     with connect(settings.db_path) as db:
         db.execute("BEGIN IMMEDIATE")
         db.execute("DELETE FROM rate_limits WHERE window_start < ?", (stamp - 900,))
-        for key, cap in zip(keys, (30, 8)):
+        for key, cap in zip(rate_limit_keys(ip, email, kind), RATE_LIMIT_CAPS):
             db.execute("INSERT INTO rate_limits VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=attempts+1", (key, stamp))
             limited |= db.execute("SELECT attempts FROM rate_limits WHERE key=?", (key,)).fetchone()[0] > cap
     if limited:
         raise HTTPException(429, "Too many attempts. Try again in 15 minutes")
+
+
+def login_rate_limit_exceeded(settings, ip, email):
+    """Read-only: has this ip/email already exceeded the login window's cap? Checked
+    before spending Argon2 work on a password that may turn out to be correct."""
+    stamp = int(time.time())
+    with connect(settings.db_path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM rate_limits WHERE window_start < ?", (stamp - 900,))
+        rows = [db.execute("SELECT attempts FROM rate_limits WHERE key=?", (key,)).fetchone()
+                for key in rate_limit_keys(ip, email, "login")]
+    return any(row and row[0] > cap for row, cap in zip(rows, RATE_LIMIT_CAPS))
+
+
+def record_login_failure(settings, ip, email):
+    """A login counts against the window only once it is known to have failed, so a
+    legitimate owner logging in often and correctly is never the one who gets locked
+    out."""
+    stamp = int(time.time())
+    with connect(settings.db_path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        for key in rate_limit_keys(ip, email, "login"):
+            db.execute("INSERT INTO rate_limits VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=attempts+1", (key, stamp))
 
 
 def signup(settings, email, password, name):
@@ -104,7 +136,8 @@ def signup(settings, email, password, name):
 
 def login(settings, email, password, ip):
     email = email_address(email)
-    rate_limit(settings, ip, email, "login")
+    if login_rate_limit_exceeded(settings, ip, email):
+        raise HTTPException(429, "Too many attempts. Try again in 15 minutes")
     with connect(settings.db_path) as db:
         user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     # Equal Argon2 work for an unknown email; never reveal whether an account exists.
@@ -118,6 +151,7 @@ def login(settings, email, password, ip):
         except (VerificationError, InvalidHashError):
             valid = False
     if not user or not valid:
+        record_login_failure(settings, ip, email)
         raise HTTPException(401, "Invalid email or password")
     if legacy:
         upgraded = HASHER.hash(password)

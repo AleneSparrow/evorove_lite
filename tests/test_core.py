@@ -51,6 +51,9 @@ def event(bid, test=False, stamp='2026-11-03T10:00:00Z', status='active'):
 
 
 def deliver(client, settings, event):
+    data = event.get('data')
+    if isinstance(data, dict):
+        data.setdefault('attributes', {}).setdefault('store_id', settings.get('LEMONSQUEEZY_STORE_ID'))
     payload = json.dumps(event).encode()
     signature = hmac.new(settings.get('LEMONSQUEEZY_WEBHOOK_SECRET').encode(), payload, hashlib.sha256).hexdigest()
     return client.post('/billing/webhook', content=payload, headers={'x-signature': signature})
@@ -190,6 +193,45 @@ def test_billing_modes(client, settings, test, email, expected):
             assert db.execute("SELECT count(*) FROM log WHERE event='billing_test_ignored'").fetchone()[0] == 1
 
 
+def test_webhook_rejects_a_non_ascii_signature_header_with_401_not_500(client):
+    # A real HTTP header can carry any byte (obs-text); httpx's str-valued headers={}
+    # only accepts ASCII, so the hostile value has to go in as raw latin-1 bytes.
+    assert client.post('/billing/webhook', content=b'{}',
+                       headers={'x-signature': 'bad-é-signature'.encode('latin-1')}).status_code == 401
+
+
+def test_webhook_rejects_an_event_for_the_wrong_lemon_squeezy_store(client, settings):
+    signup(client)
+    bid = business(settings)['id']
+    payload = event(bid)
+    payload['data']['attributes']['store_id'] = 'not-our-store'
+    assert deliver(client, settings, payload).status_code == 400
+    assert business(settings)['subscription_status'] == 'incomplete'
+
+
+def test_api_v1_billing_webhook_is_an_alias_for_the_same_handler(client, settings):
+    signup(client)
+    bid = business(settings)['id']
+    payload = event(bid)
+    payload['data']['attributes'].setdefault('store_id', settings.get('LEMONSQUEEZY_STORE_ID'))
+    body = json.dumps(payload).encode()
+    signature = hmac.new(settings.get('LEMONSQUEEZY_WEBHOOK_SECRET').encode(), body, hashlib.sha256).hexdigest()
+    response = client.post('/api/v1/billing/webhook', content=body, headers={'x-signature': signature})
+    assert response.status_code == 200
+    assert business(settings)['subscription_status'] == 'active'
+
+
+def test_login_rate_limit_counts_only_failed_attempts(client, settings):
+    signup(client)
+    for _ in range(10):
+        assert form(client, '/login', email='owner@example.com', password='long password 123').status_code == 303
+        assert form(client, '/app', '/logout').status_code == 303
+    for _ in range(9):
+        assert form(client, '/login', email='owner@example.com', password='wrong password 456').status_code == 401
+    assert form(client, '/login', email='owner@example.com', password='wrong password 456').status_code == 429
+    assert form(client, '/login', email='owner@example.com', password='long password 123').status_code == 429
+
+
 def test_signature_and_stale_events(client, settings):
     signup(client)
     bid = business(settings)['id']
@@ -226,6 +268,16 @@ def test_payment_link_for_scopes_checkout_to_person():
         'checkout[custom][business_id]': ['business-1'],
         'checkout[custom][person_id]': ['person-1'],
     }
+
+
+def test_client_zero_is_always_entitled_without_a_subscription():
+    # Evorove selling its own subscription (client 0) never goes through Lemon
+    # Squeezy itself, so it has no real subscription_status/subscription_ends_at.
+    row = {'id': 'biz-zero', 'subscription_status': 'incomplete', 'subscription_ends_at': None}
+    assert not billing.entitled(row)
+    assert billing.entitled(row, client_zero_id='biz-zero')
+    assert not billing.entitled(row, client_zero_id='some-other-business')
+    assert not billing.entitled(row, client_zero_id='')
 
 
 @pytest.mark.parametrize('event_name,data_type,data_id', [
@@ -407,6 +459,6 @@ def test_local_mailbox_password_reset(tmp_path, monkeypatch, settings):
 def test_env_example_has_only_empty_values():
     from app.db import ROOT
     entries = (ROOT / '.env.example').read_text().splitlines()
-    assert {'MARKET_SIGNALS=', 'PER_RUN_TOKEN_BUDGET='} <= set(entries)
-    assert len(entries) == 24
+    assert {'MARKET_SIGNALS=', 'PER_RUN_TOKEN_BUDGET=', 'EXTRA_ALLOWED_ORIGINS='} <= set(entries)
+    assert len(entries) == 25
     assert all(line.endswith('=') and line.count('=') == 1 for line in entries)

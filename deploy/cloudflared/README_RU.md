@@ -14,7 +14,9 @@ Cloudflare, а на сервере хранится только токен в �
    sudo chmod 0600 /etc/cloudflared/evorove.token
    ```
 
-4. После запуска приложения включите tunnel:
+4. Включите tunnel до запуска самого приложения (см. порядок в
+   `docs/DEPLOY_RU.md`, раздел 6: `litestream`/`cloudflared` переживают
+   временные 502, пока `evorove` ещё не поднялся):
 
    ```bash
    sudo systemctl enable --now cloudflared

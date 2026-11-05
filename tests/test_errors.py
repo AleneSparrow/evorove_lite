@@ -68,6 +68,29 @@ def test_unhandled_error_is_a_calm_page_without_the_cause(settings, caplog):
     assert 'Unhandled RuntimeError' in caplog.text
 
 
+def test_unhandled_error_does_not_reach_the_asgi_server(settings, caplog):
+    # ServerErrorMiddleware's re-raise exists so the ASGI server (uvicorn) can log
+    # the exception, which would print its original, unredacted message. without_
+    # reraise() wraps the whole app to drop that re-raise before it gets there.
+    # raise_server_exceptions defaults to True here (unlike the test above): if the
+    # wrapper failed to suppress the re-raise, this request would itself raise it.
+    from app.main import without_reraise
+
+    app = create_app(settings, scheduler_enabled=False)
+
+    @app.get('/__error_probe_asgi')
+    def error_probe_asgi():
+        raise RuntimeError('should-never-reach-the-asgi-server-log')
+
+    with TestClient(without_reraise(app), base_url='https://testserver', follow_redirects=False) as browser:
+        failed = browser.get('/__error_probe_asgi')
+
+    assert failed.status_code == 500
+    assert '<h1>Something went wrong</h1>' in failed.text
+    assert 'should-never-reach-the-asgi-server-log' not in failed.text
+    assert 'Unhandled RuntimeError' in caplog.text
+
+
 def test_maintenance_page_is_static_and_makes_no_time_promise(client):
     path = ROOT / 'app/static/maintenance.html'
     text = path.read_text()

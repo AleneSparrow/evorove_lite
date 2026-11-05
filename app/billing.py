@@ -27,7 +27,11 @@ def utc_date(value):
         return None
 
 
-def entitled(business, current=None):
+def entitled(business, current=None, *, client_zero_id=None):
+    # Evorove selling its own subscription (client 0) always has access, subscription
+    # or not -- it never goes through Lemon Squeezy itself.
+    if client_zero_id and business['id'] == client_zero_id:
+        return True
     if business['subscription_status'] == 'active':
         return True
     ends = utc_date(business['subscription_ends_at'])
@@ -84,7 +88,10 @@ def webhook(settings, payload, signature):
     if not secret:
         raise HTTPException(503, "Billing is not configured")
     expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-    if not signature or not hmac.compare_digest(expected, signature):
+    # hmac.compare_digest() rejects non-ASCII str arguments outright (TypeError), and
+    # an HTTP header can carry any byte; encoding first turns a hostile signature into
+    # an ordinary mismatch (401) instead of an unhandled exception (500).
+    if not signature or not hmac.compare_digest(expected.encode(), signature.encode()):
         raise HTTPException(401, "Invalid signature")
     try:
         event = json.loads(payload)
@@ -93,6 +100,8 @@ def webhook(settings, payload, signature):
         if name not in EVENTS | INVOICES | ORDERS:
             return
         attributes = data["attributes"]
+        if str(attributes.get("store_id")) != str(settings.get("LEMONSQUEEZY_STORE_ID")):
+            raise ValueError()
         if name in EVENTS:
             if data["type"] != "subscriptions" or attributes["status"] not in STATUSES:
                 raise ValueError()

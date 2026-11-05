@@ -225,8 +225,10 @@ free -h
   `BILLING_TEST_MODE_ALLOWED_EMAILS`, `SYSTEM_SMTP_HOST`, `SYSTEM_SMTP_PORT`,
   `SYSTEM_SMTP_USER`, `SYSTEM_SMTP_PASSWORD`, `SYSTEM_SMTP_FROM`,
   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CLIENT_ZERO_BUSINESS_ID`,
-  `TIMEZONE_OWNER`, `MARKET_SIGNALS` (полный и актуальный список всегда в
-  `.env.example`; что каждая означает — в `docs/CONTRACT.md`).
+  `TIMEZONE_OWNER`, `MARKET_SIGNALS`; необязательные
+  `LEGACY_ACCOUNT_SECURITY_ENCRYPTION_KEY` и `EXTRA_ALLOWED_ORIGINS` нужны
+  только на переезде (`docs/CUTOVER_RU.md`) — полный и актуальный список
+  всегда в `.env.example`; что каждая означает — в `docs/CONTRACT.md`.
 - `/etc/evorove/litestream.env` (раздел 5): `LITESTREAM_R2_BUCKET`,
   `LITESTREAM_R2_ENDPOINT`, `LITESTREAM_R2_ACCESS_KEY_ID`,
   `LITESTREAM_R2_SECRET_ACCESS_KEY`.
@@ -234,12 +236,15 @@ free -h
   строки — tunnel token целиком.
 
 **Команда запуска** (после того, как все файлы выше заполнены и
-`deploy/setup.sh` уже выполнен без ошибок — раздел 2 и 6):
+`deploy/setup.sh` уже выполнен без ошибок — раздел 2 и 6; порядок именно
+такой — `litestream`/`cloudflared` переживают временные 502/ожидание файла
+базы, `preflight` и сам `evorove` идут только после них):
 
 ```bash
+sudo systemctl start litestream cloudflared
+sudo make -C /opt/evorove preflight
 sudo systemctl start evorove
-sudo systemctl start litestream
-sudo systemctl start cloudflared
+make -C /opt/evorove smoke BASE_URL=https://YOUR_DOMAIN
 ```
 
 **Проверка `/health`** (должно вернуть успешный ответ до и после каждого

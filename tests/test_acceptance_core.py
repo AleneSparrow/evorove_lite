@@ -24,6 +24,29 @@ def test_b2_csp_allows_only_self_and_lemon_squeezy_form_targets(client):
     assert directives['default-src'] == "'self'"
 
 
+def test_hsts_and_permissions_policy_are_set_on_every_response(client):
+    headers = client.get('/signup').headers
+    assert headers['strict-transport-security'] == 'max-age=31536000'
+    assert headers['permissions-policy'] == 'geolocation=(), microphone=(), camera=(), payment=(), usb=()'
+
+
+def test_extra_allowed_origins_permits_additional_hosts_for_the_cutover_smoke_check(client, settings):
+    import re
+    page = client.get('/signup')
+    csrf = re.search('name="csrf" value="([^"]+)"', page.text)[1]
+    fields = {'csrf': csrf, 'email': 'cutover@example.com', 'password': 'cutover password 1', 'business_name': 'Cutover'}
+    assert client.post('/signup', data=fields, headers={'Origin': 'https://cutover-check.evorove.com'}).status_code == 403
+    settings.values['EXTRA_ALLOWED_ORIGINS'] = 'https://cutover-check.evorove.com, https://other.example'
+    assert client.post('/signup', data=fields, headers={'Origin': 'https://cutover-check.evorove.com'}).status_code == 303
+
+
+def test_www_redirects_to_the_apex_domain(client):
+    response = client.get('/faq?x=1', headers={'Host': 'www.testserver'})
+    assert response.status_code == 301
+    assert response.headers['location'] == 'https://testserver/faq?x=1'
+    assert client.get('/faq', headers={'Host': 'testserver'}).status_code == 200
+
+
 @pytest.mark.parametrize('business_subscription', [None, 'evorove-subscription'])
 @pytest.mark.parametrize('initial_status', ['incomplete', 'active'])
 @pytest.mark.parametrize('name,kind', [('order_created', 'orders'), ('subscription_payment_success', 'subscription-invoices')])

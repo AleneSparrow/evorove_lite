@@ -24,6 +24,9 @@ def submit(client, page, target=None, **fields):
 
 
 def webhook(client, settings, event):
+    data = event.get('data')
+    if isinstance(data, dict):
+        data.setdefault('attributes', {}).setdefault('store_id', settings.get('LEMONSQUEEZY_STORE_ID'))
     payload = json.dumps(event).encode()
     signature = hmac.new(settings.get('LEMONSQUEEZY_WEBHOOK_SECRET').encode(), payload,
                          hashlib.sha256).hexdigest()

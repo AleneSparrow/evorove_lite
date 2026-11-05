@@ -3,7 +3,7 @@ import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.exception_handlers import http_exception_handler
@@ -26,8 +26,35 @@ SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
     "Cache-Control": "no-store",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=(), usb=()",
     "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; form-action 'self' https://*.lemonsqueezy.com",
 }
+
+
+def canonical_host(settings):
+    return urlparse(settings.base_url).hostname
+
+
+def allowed_origins(settings):
+    extra = {origin.strip().rstrip("/") for origin in settings.get("EXTRA_ALLOWED_ORIGINS", "").split(",") if origin.strip()}
+    return {settings.base_url, *extra}
+
+
+def without_reraise(asgi_app):
+    """Starlette's ServerErrorMiddleware re-raises every unhandled exception after
+    sending the response our own exception_handler(Exception) already built, purely
+    so the ASGI server can log it -- which would print the exception's own,
+    unredacted message straight to the process log. That handler already wrote a
+    safe, redacted line and the response is already sent by the time this re-raise
+    happens, so drop it here, outside everything Starlette controls."""
+    async def wrapped(scope, receive, send):
+        try:
+            await asgi_app(scope, receive, send)
+        except Exception:
+            if scope["type"] != "http":
+                raise
+    return wrapped
 
 
 def create_app(settings=None, *, scheduler_enabled=True):
@@ -80,6 +107,13 @@ def create_app(settings=None, *, scheduler_enabled=True):
 
     @app.middleware("http")
     async def security_headers(request, call_next):
+        settings_ = request.app.state.settings
+        host = canonical_host(settings_)
+        if host and request.url.hostname == "www." + host:
+            target = settings_.base_url + request.url.path
+            if request.url.query:
+                target += "?" + request.url.query
+            return apply_security_headers(RedirectResponse(target, status_code=301))
         return apply_security_headers(await call_next(request))
 
     def render(request, template, **context):
@@ -109,7 +143,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         except BadSignature:
             raise HTTPException(403, "Reload the page and try again") from None
         origin = request.headers.get("origin")
-        if origin == "null" or (origin and origin.rstrip("/") != request.app.state.settings.base_url):
+        if origin == "null" or (origin and origin.rstrip("/") not in allowed_origins(request.app.state.settings)):
             raise HTTPException(403, "Invalid origin")
         return fields
 
@@ -198,7 +232,8 @@ def create_app(settings=None, *, scheduler_enabled=True):
         selected = request.query_params.get('person')
         business = board.business(s, bid)
         return render(request, 'board.html', business=business, columns=board.columns(s, bid),
-                      entitled=billing.entitled(business), last=board.last_search(s, bid), can_search=billing.can_search(business), person=board.person(s, bid, selected) if selected else None)
+                      entitled=billing.entitled(business, client_zero_id=s.get('CLIENT_ZERO_BUSINESS_ID')),
+                      last=board.last_search(s, bid), can_search=billing.can_search(business), person=board.person(s, bid, selected) if selected else None)
 
     @app.get('/app/people/{person_id}')
     def person_detail(request: Request, person_id: str):
@@ -320,7 +355,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         s = request.app.state.settings
         user = auth.current_user(s, request)
         business = board.business(s, user['business_id'])
-        if business['plan'] not in {'starter', 'pro'} or not billing.entitled(business):
+        if business['plan'] not in {'starter', 'pro'} or not billing.entitled(business, client_zero_id=s.get('CLIENT_ZERO_BUSINESS_ID')):
             raise HTTPException(403, 'An active Starter or Pro subscription is required')
         rows = contacts.csv_rows(fields['csv']) if 'csv' in fields else [fields]
         report = await run_in_threadpool(contacts.add, s, user['business_id'], rows)
@@ -394,6 +429,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         return RedirectResponse(url, status_code=303)
 
     @app.post("/billing/webhook")
+    @app.post("/api/v1/billing/webhook")
     async def webhook(request: Request):
         payload = await request.body()
         if len(payload) > 262144:
@@ -404,4 +440,4 @@ def create_app(settings=None, *, scheduler_enabled=True):
     return app
 
 
-app = create_app()
+app = without_reraise(create_app())

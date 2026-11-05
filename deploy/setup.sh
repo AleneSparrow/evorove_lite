@@ -7,7 +7,7 @@ APP_GROUP=evorove
 DATA_DIR=/var/lib/evorove
 CONFIG_DIR=/etc/evorove
 LITESTREAM_VERSION=0.5.14
-SSH_PORT=${SSH_PORT:-22}
+SSH_PORT=${SSH_PORT:-}
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "setup.sh must be run as root" >&2
@@ -31,6 +31,14 @@ SOURCE_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 if [ "$SOURCE_ROOT" != "$APP_ROOT" ]; then
     echo "Clone or copy the repository to $APP_ROOT before running setup.sh" >&2
     exit 1
+fi
+
+if [ -z "$SSH_PORT" ]; then
+    # The actual configured port, not an assumed default: sshd -T prints the
+    # effective config (after Include/Match), so a non-standard port is picked
+    # up automatically instead of silently locking the operator out behind UFW.
+    SSH_PORT=$(sshd -T 2>/dev/null | awk 'tolower($1) == "port" { print $2; exit }')
+    SSH_PORT=${SSH_PORT:-22}
 fi
 
 case "$SSH_PORT" in
@@ -79,7 +87,11 @@ install -d -o root -g "$APP_GROUP" -m 0750 "$CONFIG_DIR"
 install -d -o root -g cloudflared -m 0750 /etc/cloudflared
 
 if [ ! -e "$CONFIG_DIR/litestream.env" ]; then
-    install -o root -g "$APP_GROUP" -m 0640 /dev/null "$CONFIG_DIR/litestream.env"
+    # systemd reads EnvironmentFile as root before dropping privileges to the
+    # litestream.service User=, so the evorove user never needs read access to
+    # these R2 credentials -- root:root 0600 keeps them out of reach even if the
+    # main web process (which has no business with R2) is ever compromised.
+    install -o root -g root -m 0600 /dev/null "$CONFIG_DIR/litestream.env"
 fi
 if [ ! -e /etc/cloudflared/evorove.token ]; then
     install -o cloudflared -g cloudflared -m 0600 /dev/null /etc/cloudflared/evorove.token
@@ -144,6 +156,30 @@ if ! swapon --show=NAME --noheadings | grep -Fxq /swapfile; then
 fi
 if ! grep -Eq '^/swapfile[[:space:]]' /etc/fstab; then
     printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+echo "Listening TCP ports before UFW locks down the host:"
+ss -ltnup || true
+if command -v docker >/dev/null 2>&1; then
+    echo "Docker containers (this host should not run any -- no Docker required):"
+    docker ps || true
+else
+    echo "docker is not installed."
+fi
+EXTRA_LISTENERS=$(ss -H -ltn 2>/dev/null | awk -v ssh=":$SSH_PORT" \
+    '{n = split($4, a, ":"); port = ":" a[n]; if (port != ssh) print $4}')
+if [ -n "$EXTRA_LISTENERS" ]; then
+    echo "Besides SSH ($SSH_PORT/tcp), something is already listening on:" >&2
+    printf '%s\n' "$EXTRA_LISTENERS" >&2
+    printf 'Continue and let UFW allow only SSH anyway? [y/N] ' >&2
+    read -r REPLY
+    case "$REPLY" in
+        y|Y|yes|YES) ;;
+        *)
+            echo "Stopped: investigate the extra listening ports above before enabling UFW." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 ufw default deny incoming
