@@ -104,6 +104,16 @@ def test_owner_can_confirm_manual_payment(client, settings, monkeypatch):
                           (f'manual:{bid}:{pid}',)).fetchone()[0] == 1
 
 
+def test_settings_page_shows_mailbox_hints(client):
+    signup(client)
+    page = client.get('/app/settings').text
+    assert page.count('Google Workspace: SMTP smtp.gmail.com, port 587 · IMAP imap.gmail.com, port 993 · use an App Password, not your account password') == 1
+    assert page.count('Other providers: use the SMTP/IMAP settings from your email provider') == 1
+    assert 'New mailboxes start slow: 10 emails on day one, +5 each day, up to your daily limit. This protects your sender reputation.' in page
+    assert 'While paused, nothing is sent and replies are not answered.' in page
+    assert 'deliverab' not in page.lower()
+
+
 def test_settings_validation_and_no_password_echo(client, settings):
     signup(client)
     fields = {'postal_address': '12 Main Street, Austin TX', 'daily_cap': '20', 'quiet_start': '20:00', 'quiet_end': '08:00', 'outreach_paused': 'on'}
