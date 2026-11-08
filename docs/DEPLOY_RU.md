@@ -339,14 +339,13 @@ make -C /opt/evorove smoke BASE_URL=https://YOUR_DOMAIN
 ### Проверка восстановления бэкапа
 
 Запускайте после первого появления реплики в R2, после изменения настройки
-репликации и регулярно, например раз в неделю. Передайте секреты через
-systemd EnvironmentFile, как для самого Litestream:
+репликации и регулярно, например раз в неделю. Цель Makefile сама запускает
+скрипт через `systemd-run --wait --pipe --collect` с `User=evorove`,
+`Group=evorove` и `EnvironmentFile=/etc/evorove/litestream.env`, как для самого
+Litestream. Запускайте её с root-правами; ключи R2 не нужно передавать вручную:
 
 ```bash
-sudo systemd-run --wait --pipe --collect \
-  --property=User=evorove --property=Group=evorove \
-  --property=EnvironmentFile=/etc/evorove/litestream.env \
-  /usr/bin/make -C /opt/evorove backup-check
+sudo make -C /opt/evorove backup-check
 ```
 
 `backup-check.sh` восстанавливает последнюю доступную копию в закрытый

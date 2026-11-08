@@ -58,7 +58,9 @@ def test_legal_pages_describe_the_current_product(client):
     lowered_privacy = privacy.lower()
     assert 'encrypted' in lowered_privacy and 'hashed' in lowered_privacy
     assert 'delete' in lowered_privacy and 'netherlands' in lowered_privacy
-    assert 'email delivery provider for account notifications' in privacy
+    assert 'Resend (United States)' in privacy
+    assert 'Cloudflare Email Routing' in privacy
+    assert 'password resets' in privacy
     assert 'do not include prospect names or email text' in privacy
     assert 'latest search status' in privacy and 'error type' in privacy
     assert 'The AI writes each outreach email on your behalf.' in privacy
@@ -67,9 +69,11 @@ def test_legal_pages_describe_the_current_product(client):
     assert 'Address: [operator address pending].' in dpa
     assert 'service provider' in dpa.lower()
     subprocessors = pages['/subprocessors']
-    for name in ('Lemon Squeezy', 'Anthropic', 'Cloudflare', 'R2', 'JustHost', 'Netherlands', 'Telegram'):
+    for name in ('Lemon Squeezy', 'Anthropic', 'Cloudflare', 'R2', 'JustHost', 'Netherlands', 'Telegram', 'Resend'):
         assert name in subprocessors
-    assert 'email delivery provider for account notifications' in subprocessors
+    assert 'System email delivery: password resets and account notifications' in subprocessors
+    assert 'Cloudflare Email Routing forwards incoming email addressed to support@evorove.com' in subprocessors
+    assert 'none has been chosen' not in subprocessors
     assert 'not a subprocessor we appoint' in subprocessors
     assert 'do not include prospect names or email text' in subprocessors.lower()
 

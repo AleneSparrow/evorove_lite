@@ -16,7 +16,10 @@ smoke:
 	./deploy/smoke.sh "$(BASE_URL)"
 
 backup-check:
-	./deploy/backup-check.sh
+	systemd-run --wait --pipe --collect \
+		--property=User=evorove --property=Group=evorove \
+		--property=EnvironmentFile=/etc/evorove/litestream.env \
+		"$(CURDIR)/deploy/backup-check.sh"
 
 shellcheck:
 	shellcheck deploy/*.sh
