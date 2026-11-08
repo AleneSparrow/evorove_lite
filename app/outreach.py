@@ -400,9 +400,21 @@ def deliver(settings, business, person, subject, body, move, *, send, headers=No
     message = build_message(business, person, subject, full,
                             {**guards.unsubscribe_headers(settings, business['id'], person_id), **(headers or {})})
     moment = now_utc or datetime.now(timezone.utc)
-    reservation = reserve_send(settings, business, moment)
-    if reservation is None:
-        return None
+    reservation = None
+    if move == GREET:
+        reservation = reserve_send(settings, business, moment)
+        if reservation is None:
+            return None
+    else:
+        # Replies have their own REPLY_CAP and all ordinary guards, but never
+        # consume the first-letter allowance or start the warmup clock.
+        allowed, _ = guards.can_send(business['id'], address, moment, settings=settings, kind='reply')
+        if not allowed:
+            return None
+        with connect(settings.db_path) as db:
+            current = db.execute('SELECT mailbox_generation FROM businesses WHERE id=?', (business['id'],)).fetchone()
+        if not current or current['mailbox_generation'] != business['mailbox_generation']:
+            return None
     try:
         send(mailbox(settings, business, 'smtp'), message)
     except Exception as exc:
@@ -429,8 +441,9 @@ def deliver(settings, business, person, subject, body, move, *, send, headers=No
     message_id = str(uuid4())
     stage = {GREET: 'in_progress', OFFER: 'offer_made'}.get(move)
     with connect(settings.db_path) as db:
-        db.execute('UPDATE businesses SET mailbox_first_sent_at=COALESCE(mailbox_first_sent_at,?) WHERE id=? AND mailbox_generation=?',
-                   (moment.isoformat(), business['id'], business['mailbox_generation']))
+        if move == GREET:
+            db.execute('UPDATE businesses SET mailbox_first_sent_at=COALESCE(mailbox_first_sent_at,?) WHERE id=? AND mailbox_generation=?',
+                       (moment.isoformat(), business['id'], business['mailbox_generation']))
         db.execute('INSERT INTO messages(id,person_id,direction,subject,body,smtp_message_id,in_reply_to,move,created_at)'
                    " VALUES (?,?,'out',?,?,?,?,?,?)",
                    (message_id, person_id, subject, full, message['Message-ID'],
