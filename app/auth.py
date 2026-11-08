@@ -11,7 +11,6 @@ import sqlite3
 import ssl
 import time
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from uuid import uuid4
 
 from argon2 import PasswordHasher
@@ -20,10 +19,12 @@ from fastapi import HTTPException
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 
 from .db import connect, now
+from .system_mail import reset_message
 
 HASHER = PasswordHasher()
 COOKIE = "evorove_session"
 LEGACY_PBKDF2_PREFIX = "pbkdf2_sha256"
+RESET_MINUTES = 30
 
 
 def client_ip(request):
@@ -194,11 +195,7 @@ def current_user(settings, request):
 
 def send_reset(settings, recipient, token):
     host = settings.get("SYSTEM_SMTP_HOST")
-    message = EmailMessage()
-    message["From"] = settings.get("SYSTEM_SMTP_FROM", "dev@localhost")
-    message["To"] = recipient
-    message["Subject"] = "Reset your Evorove password"
-    message.set_content(f"Reset your password within 30 minutes:\n{settings.base_url}/reset?token={token}\n")
+    message = reset_message(settings, recipient, token, expires_minutes=RESET_MINUTES)
     if not host:
         if urlparse(settings.base_url).hostname not in {"localhost", "127.0.0.1"}:
             raise RuntimeError("System SMTP is not configured")
@@ -222,7 +219,7 @@ def request_reset(settings, email, ip):
     with connect(settings.db_path) as db:
         user = db.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
         if user:
-            db.execute("INSERT INTO password_resets VALUES (?,?,?,0)", (digest(token), user[0], (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()))
+            db.execute("INSERT INTO password_resets VALUES (?,?,?,0)", (digest(token), user[0], (datetime.now(timezone.utc) + timedelta(minutes=RESET_MINUTES)).isoformat()))
     if user:
         try:
             send_reset(settings, email, token)

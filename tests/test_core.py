@@ -399,7 +399,11 @@ def test_smtp_uses_verified_starttls(settings, monkeypatch):
             captured.append('login')
         def send_message(self, message):
             assert captured == ['tls', 'login']
-            assert 'https://testserver/reset?token=test-token' in message.get_content()
+            assert message.get_content_type() == 'multipart/alternative'
+            plain = message.get_body(preferencelist=('plain',)).get_content()
+            html = message.get_body(preferencelist=('html',)).get_content()
+            assert 'https://testserver/reset?token=test-token' in plain
+            assert 'https://testserver/reset?token=test-token' in html
             captured.append('sent')
     monkeypatch.setattr(auth.smtplib, 'SMTP', SMTP)
     auth.send_reset(settings, 'owner@example.com', 'test-token')
@@ -439,7 +443,7 @@ def test_local_defaults_generate_persistent_secret(tmp_path, monkeypatch):
 
 
 def test_local_mailbox_password_reset(tmp_path, monkeypatch, settings):
-    from email import message_from_string
+    from email import message_from_string, policy
     monkeypatch.chdir(tmp_path)
     settings.values['APP_BASE_URL'] = 'https://localhost:8000'
     migrate(settings.db_path)
@@ -448,9 +452,11 @@ def test_local_mailbox_password_reset(tmp_path, monkeypatch, settings):
     files = list((tmp_path / '.local/mailbox').glob('*.eml'))
     assert len(files) == 1
     assert files[0].stat().st_mode & 0o777 == 0o600
-    message = message_from_string(files[0].read_text())
-    body = message.get_payload(decode=True).decode()
-    link = re.search(r'https://localhost:8000/reset\?token=\S+', body)[0]
+    message = message_from_string(files[0].read_text(), policy=policy.default)
+    plain = message.get_body(preferencelist=('plain',)).get_content()
+    html = message.get_body(preferencelist=('html',)).get_content()
+    link = re.search(r'https://localhost:8000/reset\?token=\S+', plain)[0]
+    assert link in html
     token = parse_qs(urlparse(link).query)['token'][0]
     auth.reset_password(settings, token, 'replacement password')
     assert auth.login(settings, 'dev@example.com', 'replacement password', '127.0.0.1') == user

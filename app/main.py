@@ -21,6 +21,9 @@ from .settings import load
 
 log = logging.getLogger(__name__)
 
+AUTH_FORM_PATHS = {"/signup", "/login", "/forgot-password", "/reset"}
+AUTH_FORM_ERRORS = {400, 401, 403, 429}
+
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -88,12 +91,29 @@ def create_app(settings=None, *, scheduler_enabled=True):
         response = templates.TemplateResponse(request=request, name=template, context={"code": status}, status_code=status)
         return apply_security_headers(response)
 
+    def auth_form_error(request, exc):
+        # The same night-theme form, with the message above the fields.
+        # Password is never copied onto the page.
+        fields = getattr(request.state, "form_fields", None) or {}
+        response = render(
+            request, "auth.html",
+            mode=request.url.path.strip("/"),
+            token=fields.get("token", "") or request.query_params.get("token", ""),
+            email=fields.get("email", ""),
+            business_name=fields.get("business_name", ""),
+            error=exc.detail if isinstance(exc.detail, str) else "Try again",
+        )
+        response.status_code = exc.status_code
+        return apply_security_headers(response)
+
     @app.exception_handler(StarletteHTTPException)
     async def http_errors(request: Request, exc: StarletteHTTPException):
         if exc.status_code == 404:
             return error_page(request, 404)
         if exc.status_code == 500:
             return error_page(request, 500)
+        if request.method == "POST" and request.url.path in AUTH_FORM_PATHS and exc.status_code in AUTH_FORM_ERRORS:
+            return auth_form_error(request, exc)
         response = await http_exception_handler(request, exc)
         return apply_security_headers(response)
 
@@ -138,6 +158,10 @@ def create_app(settings=None, *, scheduler_enabled=True):
                 raise HTTPException(413, 'Form is too large')
         fields = contacts.multipart_fields(content_type, bytes(body)) if multipart else {
             key: values[0] for key, values in parse_qs(body.decode(), keep_blank_values=True).items()}
+        if request.url.path in AUTH_FORM_PATHS:
+            request.state.form_fields = {
+                key: fields[key] for key in ("email", "business_name", "token")
+                if isinstance(fields.get(key), str)}
         try:
             nonce = URLSafeTimedSerializer(request.app.state.settings.secret, salt="csrf").loads(fields.get("csrf", ""), max_age=3600)
             if not secrets.compare_digest(nonce, request.cookies.get("csrf", "")):

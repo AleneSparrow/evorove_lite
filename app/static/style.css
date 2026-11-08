@@ -202,6 +202,7 @@ blockquote{margin:12px 0;padding:14px;background:var(--inset);border-radius:6px;
 .plans h2{flex-basis:100%;font-size:clamp(28px,4vw,36px)}
 .auth-panel{max-width:480px;margin:24px auto}
 .auth-panel nav{display:flex;flex-wrap:wrap;gap:8px 16px}
+.form-error{margin:0 0 8px;padding:12px 14px;background:var(--inset);border-left:3px solid var(--accent);border-radius:6px;color:var(--text);font-size:14px;line-height:20px;font-weight:400}
 .narrow{max-width:680px;margin:0 auto}
 label{display:block;font-size:13px;font-weight:600;margin:18px 0}
 input,textarea,select{display:block;width:100%;margin-top:8px;padding:12px;min-height:44px;font:400 15px Inter,system-ui,sans-serif;color:var(--text);background:var(--inset);border:1px solid var(--line);border-radius:6px}

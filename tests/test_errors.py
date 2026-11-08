@@ -57,7 +57,7 @@ def test_unhandled_error_is_a_calm_page_without_the_cause(settings, caplog):
         assert 'Traceback' not in failed.text
         assert PROMISES.search(visible_text(failed.text)) is None
         assert failed.headers['content-security-policy'].startswith("default-src 'self'")
-        denied = browser.post('/signup', data={'email': 'x@example.com'})
+        denied = browser.post('/logout', data={'email': 'x@example.com'})
         assert denied.status_code == 403
         assert denied.headers['content-type'].startswith('application/json')
 

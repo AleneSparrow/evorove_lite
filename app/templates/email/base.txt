@@ -1,0 +1,14 @@
+EVOROVE
+
+{% block body %}{% endblock %}
+
+— The Evorove team
+
+{{ banner }}
+{{ product_line }}
+{{ site_url }}
+
+{{ support_email }}
+{% if operator_name %}
+{{ operator_name }}
+{% endif %}

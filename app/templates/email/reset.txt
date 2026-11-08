@@ -1,0 +1,11 @@
+{% extends "base.txt" %}
+{% block body %}
+Reset your password
+
+Choose a new password for your Evorove account.
+This link only works once.
+
+{{ action_url }}
+
+Link expires in {{ expires_minutes }} minutes. If you didn't request this, ignore this email.
+{% endblock %}
