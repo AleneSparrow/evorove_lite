@@ -42,6 +42,36 @@ def test_cancelled_access_across_webhook_import_search_and_scheduler(client, set
     assert client.get('/app/search-preview/status').status_code == (200 if allowed and plan == 'pro' else 403)
 
 
+def test_scheduler_runs_send_and_search_for_client_zero_without_a_subscription(client, settings, monkeypatch):
+    # Client 0 (Evorove selling its own subscription) never has a real Lemon
+    # Squeezy subscription or a 'pro' plan of its own, but it must still run.
+    signup(client)
+    zero = business(settings)['id']
+    settings.values['CLIENT_ZERO_BUSINESS_ID'] = zero
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE businesses SET outreach_paused=0,brief='x' WHERE id=?", (zero,))
+    moment = datetime(2026, 11, 3, 13, tzinfo=timezone.utc)
+    jobs = scheduler.Scheduler(settings)
+    calls = []
+    monkeypatch.setattr(jobs, 'dispatch', lambda bid, kind, since=None: calls.append((bid, kind)))
+    client.portal.call(jobs.tick, moment)
+    assert calls == [(zero, 'search'), (zero, 'send'), (zero, 'poll')]
+
+
+def test_scheduler_does_not_run_for_an_ordinary_business_without_a_subscription(client, settings, monkeypatch):
+    signup(client)
+    bid = business(settings)['id']
+    settings.values['CLIENT_ZERO_BUSINESS_ID'] = 'some-other-business'
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE businesses SET outreach_paused=0,brief='x' WHERE id=?", (bid,))
+    moment = datetime(2026, 11, 3, 13, tzinfo=timezone.utc)
+    jobs = scheduler.Scheduler(settings)
+    calls = []
+    monkeypatch.setattr(jobs, 'dispatch', lambda bid, kind, since=None: calls.append((bid, kind)))
+    client.portal.call(jobs.tick, moment)
+    assert calls == []
+
+
 def test_cancelled_deadline_expires_without_expired_webhook_and_resume_clears_it(client, settings):
     signup(client)
     snapshot = event(business(settings)['id'], status='cancelled')

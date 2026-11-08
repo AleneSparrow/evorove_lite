@@ -27,9 +27,20 @@ def utc_date(value):
         return None
 
 
-def entitled(business, current=None, *, client_zero_id=None):
-    # Evorove selling its own subscription (client 0) always has access, subscription
-    # or not -- it never goes through Lemon Squeezy itself.
+def is_client_zero(business, settings):
+    """Evorove selling its own subscription. Pass `settings` (not a bare id) so every
+    caller that already has it gets the carve-out for free -- there is no separate
+    value to remember to thread through."""
+    client_zero_id = settings.get('CLIENT_ZERO_BUSINESS_ID') if settings is not None else ''
+    return bool(client_zero_id) and business['id'] == client_zero_id
+
+
+def entitled(business, current=None, *, client_zero_id=None, settings=None):
+    # Client 0 always has access, subscription or not -- it never goes through
+    # Lemon Squeezy itself. `settings` is the normal path; `client_zero_id` stays for
+    # callers (tests) that only have a bare business row, not a full Settings.
+    if settings is not None and is_client_zero(business, settings):
+        return True
     if client_zero_id and business['id'] == client_zero_id:
         return True
     if business['subscription_status'] == 'active':
@@ -192,12 +203,16 @@ def webhook(settings, payload, signature):
         db.execute("INSERT INTO log(business_id,event,detail,created_at) VALUES (?,'billing_applied',?,?)", (business_id, stamp, now()))
 
 
-def can_search(business, current=None):
-    return business['plan'] == 'pro' and entitled(business, current)
+def can_search(business, current=None, *, settings=None):
+    # Client 0 can search regardless of `plan` -- it was never sold a Starter/Pro
+    # plan of its own.
+    if settings is not None and is_client_zero(business, settings):
+        return True
+    return business['plan'] == 'pro' and entitled(business, current, settings=settings)
 
 
-def require_search(business):
-    if not can_search(business):
+def require_search(business, *, settings=None):
+    if not can_search(business, settings=settings):
         raise HTTPException(403, 'Lead search requires an active Pro subscription')
 
 

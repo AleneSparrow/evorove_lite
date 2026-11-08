@@ -164,30 +164,26 @@ systemd-юниты) и шага 2 из `docs/ROADMAP.md` (переезд дан�
 репозитории файл называется чуть иначе, это один и тот же скрипт), что он
 **не** переносит и что по каждому пробелу решает Алёна.
 
-**Переносит сегодня** (включая `subscription_ends_at` и `imap_last_uid` —
-оба уже переносятся, старых пробелов по ним больше нет):
+**Переносит сегодня:**
 
-| Таблица в новой SQLite | Источник на Railway | Пробел по описи |
+| Таблица в новой SQLite | Источник на Railway | Примечание |
 | --- | --- | --- |
 | `businesses`, включая `subscription_ends_at` (1 строка) | `businesses` + активная `business_dna` (engine), опционально `briefs` (lead) | — |
-| `businesses.smtp_host/smtp_port/smtp_user`, `imap_host/imap_port/imap_user/imap_last_uid` | `email_connections` (engine) | **Для этого переезда не используем — см. «Новый ящик рассылки» ниже**: ящик меняется на новый домен, старые host/user не подходят, а перенесённый `imap_last_uid` ссылается на старый ящик и собьёт курсор нового. Пароли (`smtp_password_enc`) не переносятся в любом случае — другой ключ шифрования. |
+| `businesses.smtp_host/smtp_port/smtp_user`, `imap_host/imap_port/imap_user` | `email_connections` (engine) | **Для этого переезда не используем — см. «Новый ящик рассылки» ниже**: ящик меняется на новый домен, старые host/user не подходят. Пароли (`smtp_password_enc`) не переносятся в любом случае — другой ключ шифрования. |
+| `businesses.imap_last_uid`/`imap_uidvalidity` | `email_connections` (engine) | **По умолчанию не переносятся вообще** (оба пишутся `NULL`) — курсор IMAP сбрасывается, не наследуется от старого ящика. Флаг `--keep-imap-cursor` существует, но **не используем его** в этом переезде: ящик новый, курсор старого к нему не относится. |
 | `users` | `staff_users` этого бизнеса (engine); старый `pbkdf2_sha256$...` хеш пароля `app/auth.py` понимает и обновит до Argon2 при первом входе | — |
 | `suppressions` | `email_suppressions` (engine) | — |
-| `people` | `board_people` (crm) — только строки с email | контакты без email из `board_people` пропускаются (в `evorove_lite` email обязателен) |
-| `people.pain/evidence_quote/source_url/us_state` + `messages` | `board_touches` (crm): `kind='assembled'` → поля карточки, `kind='message'` → сообщение (`summary`, обрезан до 500 символов) | полный текст писем и `subject` лежат в `conversations`/`conversation_messages` (engine), скрипт их не читает — решает Алёна (см. ниже) |
+| `people` | `board_people` (crm, только строки с email) + непринятые лиды `engine.leads`/`lead.leads` при `--include-unboarded-leads` | контакты без email пропускаются (в `evorove_lite` email обязателен); без флага непринятые лиды не переносятся — **решает Алёна**, нужны ли они, или их проще найти заново циклом 1 |
+| `messages` (полный текст + `subject` + `smtp_message_id` для трединга) | `conversation_messages` (engine) в приоритете; `board_touches` (crm, обрезанная до 500 символов сводка) добавляется только там, где полного сообщения нет | — |
+| `people.pain/evidence_quote/source_url/us_state` | `board_touches` (crm), `kind='assembled'` | — |
+| `log` (заметки владельца, `event='note'`) | `board_notes` (crm) | — |
 
 **Не переносит вообще** (ввести/решить отдельно):
 - паролей `smtp_password_enc`/`imap_password_enc` — другой ключ шифрования,
   вводятся заново на `/app/settings` (раздел 1 и «Новый ящик рассылки»
   ниже), порт SMTP — **587** (поле уже стоит на 587 по умолчанию в форме
   настроек);
-- `board_notes` (ручные заметки владельца на карточках, crm) — **решает
-  Алёна**: если есть важные заметки, их нужно будет добавить в `log` отдельно
-  (скрипт сегодня это не делает);
-- `engine.leads`/`outreach_prospects` и `lead.leads`/`contacts` (контакты, не
-  дошедшие до доски CRM из-за старого сбоя связки сервисов или просто ещё не
-  принятые) — **решает Алёна**: искать их заново циклом 1 в `evorove_lite`
-  или всё же импортировать с флагом `--include-unboarded-leads`;
+- `imap_last_uid`/`imap_uidvalidity` — намеренно, см. таблицу выше;
 - `billing_webhook_events`, `marketing_assets`/`marketing_guidance`,
   `staff_sessions`/`password_reset_tokens`/`login_throttles`, всё про
   встречи/календарь/КП/эскалации/LoRA, дубликаты CRM-таблиц (`leads`,
@@ -207,16 +203,17 @@ Postgres-соединение открывается заведомо read-only
 `--apply` и переменной `DB_PATH` применяет миграции и записывает данные в
 новую SQLite.
 
-**Полный импорт (`--apply`) выполняется один раз.** Повторный запуск — только
-с явным `--force-reimport` (как и `--suppressions-only` выше, этот флаг
-готовит параллельный агент — если его ещё нет в скрипте, запрет повторного
-`--apply` без него тоже ещё не работает, а значит обычный `--apply` **молча
-перезапишет** то, что Алёна уже настроила руками на `/app/settings` после
-первого импорта; пароли почты он и так никогда не трогает, раз их не
-импортирует, но `smtp_host`/`imap_host`/`imap_user`/`subscription_ends_at` и
-прочее из таблицы выше — перезапишет). Пока `--force-reimport` не
-реализован, единственная защита — дисциплина: не гонять `--apply` повторно
-ради проверки, для этого достаточно безопасного для повторов `--dry-run`.
+**Полный импорт (`--apply`) выполняется один раз — и это теперь проверяется
+кодом, не только дисциплиной.** Если в базе уже есть хоть один прогон
+(`runs`) или ещё не отмеченное импортом сообщение — повторный `--apply` без
+`--force-reimport` **отказывает** (`Import refused: live database; use
+--force-reimport to preserve existing rows`) и ничего не пишет. С явным
+`--force-reimport` импорт выполняется, но существующие строки (бизнес,
+пользователи, стоп-лист, карточки, сообщения) **не перезаписываются** —
+вставки идут через `ON CONFLICT DO NOTHING`, так что то, что Алёна уже
+настроила руками на `/app/settings` после первого импорта, не затирается.
+Повторный прогон без `--force-reimport` ради проверки всё равно не нужен —
+`--dry-run` безопасен для повторов сколько угодно раз.
 
 Новый бизнес после импорта всегда остаётся с рассылкой **на паузе**
 (`outreach_paused`, по умолчанию включена) — это намеренно, и после импорта
@@ -254,8 +251,6 @@ sudo -u evorove /opt/evorove/.venv/bin/pip install \
     DB_PATH=/var/lib/evorove/evorove.sqlite3 \
     /opt/evorove/.venv/bin/python /opt/evorove/scripts/import_from_railway.py --suppressions-only --apply
   ```
-  (флаг `--suppressions-only` готовит параллельный агент — если его ещё нет
-  в скрипте, подождите, прежде чем отмечать этот пункт).
 - [ ] Только если числа из `--dry-run` похожи на правду — полный `--apply`,
       один раз:
   ```bash
@@ -264,20 +259,9 @@ sudo -u evorove /opt/evorove/.venv/bin/pip install \
     /opt/evorove/.venv/bin/python /opt/evorove/scripts/import_from_railway.py --apply
   ```
 - [ ] Повторный `--dry-run` после импорта — числа не должны расти при ещё
-      одном случайном запуске.
-- [ ] **Проверить `imap_last_uid` вручную и очистить, если он не пуст** —
-      скрипт переносит его из старого ящика (таблица выше), а новый ящик
-      рассылки на новом домене не имеет с ним ничего общего:
-  ```bash
-  sudo -u evorove sqlite3 /var/lib/evorove/evorove.sqlite3 \
-    "SELECT imap_last_uid, imap_uidvalidity FROM businesses WHERE id='<CLIENT_ZERO_BUSINESS_ID>'"
-  sudo -u evorove sqlite3 /var/lib/evorove/evorove.sqlite3 \
-    "UPDATE businesses SET imap_last_uid=NULL, imap_uidvalidity=NULL WHERE id='<CLIENT_ZERO_BUSINESS_ID>'"
-  ```
-  Без этого первый `poll_replies()` против нового ящика будет искать письма
-  начиная с чужого (старого) номера UID и может не увидеть ничего, пока
-  новый ящик не накопит писем сверх этого номера — тихая потеря ответов,
-  незаметная до первой реальной переписки.
+      одном случайном запуске. Курсор IMAP не требует отдельной проверки —
+      без `--keep-imap-cursor` (мы его не передаём) `imap_last_uid`/
+      `imap_uidvalidity` уже `NULL` по умолчанию.
 - [ ] Когда раздел 3 полностью закончен — `unset` три переменные подключения
       и `CLIENT_ZERO_BUSINESS_ID` в этой же сессии:
   ```bash

@@ -234,8 +234,8 @@ def create_app(settings=None, *, scheduler_enabled=True):
         selected = request.query_params.get('person')
         business = board.business(s, bid)
         return render(request, 'board.html', business=business, columns=board.columns(s, bid),
-                      entitled=billing.entitled(business, client_zero_id=s.get('CLIENT_ZERO_BUSINESS_ID')),
-                      last=board.last_search(s, bid), can_search=billing.can_search(business), person=board.person(s, bid, selected) if selected else None)
+                      entitled=billing.entitled(business, settings=s),
+                      last=board.last_search(s, bid), can_search=billing.can_search(business, settings=s), person=board.person(s, bid, selected) if selected else None)
 
     @app.get('/app/people/{person_id}')
     def person_detail(request: Request, person_id: str):
@@ -291,7 +291,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         s = request.app.state.settings
         user = auth.current_user(s, request)
         business = board.business(s, user['business_id'])
-        billing.require_search(business)
+        billing.require_search(business, settings=s)
         if not business['brief']:
             raise HTTPException(400, 'Add a search brief in Settings first')
         request.app.state.scheduler.dispatch(user['business_id'], 'search')
@@ -303,7 +303,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
     def search_preview(request: Request):
         s = request.app.state.settings
         user = auth.current_user(s, request)
-        billing.require_search(board.business(s, user['business_id']))
+        billing.require_search(board.business(s, user['business_id']), settings=s)
         return render(request, 'search_preview.html',
                       preview=request.app.state.search_previews.get(user['business_id']))
 
@@ -311,7 +311,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
     def search_preview_status(request: Request):
         s = request.app.state.settings
         user = auth.current_user(s, request)
-        billing.require_search(board.business(s, user['business_id']))
+        billing.require_search(board.business(s, user['business_id']), settings=s)
         return render(request, 'search_preview_results.html',
                       preview=request.app.state.search_previews.get(user['business_id']))
 
@@ -322,7 +322,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         user = auth.current_user(s, request)
         bid = user['business_id']
         business = board.business(s, bid)
-        billing.require_search(business)
+        billing.require_search(business, settings=s)
         if not business['brief']:
             raise HTTPException(400, 'Add a search brief in Settings first')
         current = request.app.state.search_previews.get(bid)
@@ -357,7 +357,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
         s = request.app.state.settings
         user = auth.current_user(s, request)
         business = board.business(s, user['business_id'])
-        if business['plan'] not in {'starter', 'pro'} or not billing.entitled(business, client_zero_id=s.get('CLIENT_ZERO_BUSINESS_ID')):
+        if business['plan'] not in {'starter', 'pro'} or not billing.entitled(business, settings=s):
             raise HTTPException(403, 'An active Starter or Pro subscription is required')
         rows = contacts.csv_rows(fields['csv']) if 'csv' in fields else [fields]
         report = await run_in_threadpool(contacts.add, s, user['business_id'], rows)

@@ -48,7 +48,7 @@ class Scheduler:
             if kind == 'search':
                 with connect(self.settings.db_path) as db:
                     business = db.execute('SELECT * FROM businesses WHERE id=?', (business_id,)).fetchone()
-                    if not business or not billing.can_search(business):
+                    if not business or not billing.can_search(business, settings=self.settings):
                         db.execute("INSERT INTO log(business_id,event,detail,created_at) VALUES (?,'search_skipped',?,?)",
                                    (business_id, 'Lead search requires Pro with subscription access', now()))
                         db.execute("UPDATE runs SET status='skipped',finished_at=? WHERE id=?", (now(), run_id))
@@ -99,11 +99,11 @@ class Scheduler:
         with connect(self.settings.db_path) as db:
             businesses = [dict(row) for row in db.execute('SELECT * FROM businesses')]
         for business in businesses:
-            if not billing.entitled(business, current) or business['outreach_paused']:
+            if not billing.entitled(business, current, settings=self.settings) or business['outreach_paused']:
                 continue
             bid = business['id']
             day = guards._owner_day_start(self.settings, current)
-            if current.hour >= 13 and billing.can_search(business, current):
+            if current.hour >= 13 and billing.can_search(business, current, settings=self.settings):
                 self.dispatch(bid, 'search', day)
             for kind, interval in (('send', 15), ('poll', 5)):
                 # Scheduler opens a US-wide window; guards check each recipient immediately before SMTP.
