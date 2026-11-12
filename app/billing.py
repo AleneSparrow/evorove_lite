@@ -71,8 +71,10 @@ def checkout(settings, user, plan):
     if not all((variant, settings.get("LEMONSQUEEZY_API_KEY"), settings.get("LEMONSQUEEZY_STORE_ID"))):
         raise HTTPException(503, "Billing is not configured")
     with connect(settings.db_path) as db:
-        business = db.execute("SELECT subscription_status FROM businesses WHERE id=?", (user["business_id"],)).fetchone()
-    if business[0] in {"active", "on_trial", "cancelled"}:
+        business = db.execute("SELECT * FROM businesses WHERE id=?", (user["business_id"],)).fetchone()
+    # A cancelled subscription blocks a new checkout only while its paid period lasts: once
+    # ends_at has passed, access is closed by time even if subscription_expired never arrived.
+    if business["subscription_status"] == "on_trial" or entitled(business):
         raise HTTPException(409, "A subscription already exists")
     body = {"data": {"type": "checkouts", "attributes": {
         "checkout_options": {"skip_trial": True},
@@ -194,7 +196,11 @@ def webhook(settings, payload, signature):
         if latest and stamp <= latest[0]:
             return
         if business["ls_subscription_id"] and business["ls_subscription_id"] != subscription:
-            if name != "subscription_created" or business["subscription_status"] != "expired":
+            # Only a lapsed subscription may be replaced; "cancelled" past ends_at is lapsed
+            # even when subscription_expired was lost.
+            lapsed = business["subscription_status"] == "expired" or (
+                business["subscription_status"] == "cancelled" and not entitled(business))
+            if name != "subscription_created" or not lapsed:
                 return
         ends = utc_date(attributes.get("ends_at")) if attributes["status"] == "cancelled" else None
         db.execute("UPDATE businesses SET plan=?,subscription_status=?,ls_customer_id=?,ls_subscription_id=?,subscription_ends_at=? WHERE id=?",
