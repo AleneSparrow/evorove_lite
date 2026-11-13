@@ -548,7 +548,7 @@ def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=
     received = 0
     for message in messages:
         try:
-            if handle_reply(settings, business, message, own, send=send, llm=llm, now_utc=moment):
+            if handle_reply(settings, business, message, own):
                 received += 1
         except Exception:
             break  # retried on the next sweep; the cursor is not advanced past it
@@ -559,11 +559,11 @@ def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=
     return received
 
 
-def handle_reply(settings, business, message, own_address, *, send, llm=None, now_utc=None):
+def handle_reply(settings, business, message, own_address):
     """Store one inbound email once. Opt-out and hostility close the thread
-    right away (no SMTP needed, so no guard can delay them); everything else
-    is handed to attempt_reply, and left for answer_pending_replies to retry
-    if a guard blocks it this time."""
+    right away (no SMTP needed, so no guard can delay them) and run on every
+    inbound message. Everything else is left for answer_pending_replies,
+    which answers each person once per poll against their newest message."""
     business_id = business['id']
     sender = message['from']
     if not sender or sender == own_address or message['automatic']:
@@ -584,11 +584,6 @@ def handle_reply(settings, business, message, own_address, *, send, llm=None, no
         db.execute('UPDATE people SET updated_at=? WHERE id=?', (now(), person['id']))
     if is_opt_out(text) or HOSTILE.search(text[:500]):
         return stop_contact(settings, business_id, person, 'reply_opt_out')
-    if person['stage'] in {'done', 'lost'}:
-        return True  # shown on the card, not answered
-    references = ' '.join(part for part in (message['references'], message['message_id']) if part)
-    attempt_reply(settings, business, person, in_reply_to=message['message_id'], references=references,
-                 subject=message['subject'], text=text, send=send, llm=llm, now_utc=now_utc)
     return True
 
 
@@ -616,9 +611,13 @@ def attempt_reply(settings, business, person, *, in_reply_to, references, subjec
     moment = now_utc or datetime.now(timezone.utc)
     allowed, reason = guards.can_send(business_id, person['email'], moment, settings=settings, kind='reply')
     if not allowed:
+        day = guards._owner_day_start(settings, moment)
         with connect(settings.db_path) as db:
-            db.execute('INSERT INTO log(business_id,person_id,event,detail,created_at) VALUES (?,?,?,?,?)',
-                       (business_id, person['id'], 'reply_blocked', reason, now()))
+            if not db.execute(
+                "SELECT 1 FROM log WHERE business_id=? AND person_id=? AND event='reply_blocked' "
+                'AND detail=? AND created_at>=?', (business_id, person['id'], reason, day)).fetchone():
+                db.execute('INSERT INTO log(business_id,person_id,event,detail,created_at) VALUES (?,?,?,?,?)',
+                           (business_id, person['id'], 'reply_blocked', reason, now()))
         return False
     reply_subject = (subject or '').strip() or 'Your reply'
     if not reply_subject.casefold().startswith('re:'):
@@ -646,25 +645,34 @@ def pending_replies(db, business_id):
 
 
 def answer_pending_replies(settings, business, *, send, llm=None, now_utc=None):
-    """Retry every inbound message that never got an answer. Runs on every
-    poll (see poll_replies), so a reply blocked once by quiet hours or the
-    reply cap goes out as soon as its own window allows -- it is never simply
-    dropped because the IMAP cursor already moved past it."""
+    """Answer each person at most once per poll, against their newest pending
+    message, so two unanswered messages from the same person produce one
+    reply, not two. Any earlier pending message from that person is marked
+    reply_processed=1 in the same step, so it is never answered later. Runs
+    on every poll (see poll_replies), so a reply blocked once by quiet hours
+    or the reply cap goes out as soon as its own window allows -- it is never
+    simply dropped because the IMAP cursor already moved past it."""
     business_id = business['id']
     with connect(settings.db_path) as db:
         pending = pending_replies(db, business_id)
-    answered = 0
+    by_person = {}
     for row in pending:
+        by_person.setdefault(row['person_id'], []).append(row)
+    answered = 0
+    for person_id, rows in by_person.items():
+        *older, newest = rows
         with connect(settings.db_path) as db:
-            person = db.execute('SELECT * FROM people WHERE id=?', (row['person_id'],)).fetchone()
+            if older:
+                db.executemany('UPDATE messages SET reply_processed=1 WHERE id=?', [(row['id'],) for row in older])
+            person = db.execute('SELECT * FROM people WHERE id=?', (person_id,)).fetchone()
         if not person:
             continue
         person = dict(person)
         if person['stage'] in {'done', 'lost'}:
             continue  # changed since the query ran, e.g. stopped earlier this same poll
-        if attempt_reply(settings, business, person, in_reply_to=row['smtp_message_id'],
-                         references=row['smtp_message_id'], subject=row['subject'] or '',
-                         text=row['body'], send=send, llm=llm, now_utc=now_utc):
+        if attempt_reply(settings, business, person, in_reply_to=newest['smtp_message_id'],
+                         references=newest['smtp_message_id'], subject=newest['subject'] or '',
+                         text=newest['body'], send=send, llm=llm, now_utc=now_utc):
             answered += 1
     return answered
 

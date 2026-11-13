@@ -1,8 +1,11 @@
 """Deployment checks. Never print exception details, response bodies or env values."""
 import argparse
+import json
 import os
 import signal
+import sys
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import shutil
@@ -14,7 +17,12 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+import jinja2
+
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from app.settings import Settings  # noqa: E402 -- needs ROOT on sys.path first
 # Production policy: keep required names here only (runtime has some dev defaults).
 REQUIRED_ENV = frozenset('''
 APP_BASE_URL SECRET_KEY DB_PATH ANTHROPIC_API_KEY ANTHROPIC_MODEL
@@ -179,9 +187,106 @@ def backup_check(db_path, config):
         return int(not compare_databases(db_path, restored))
 
 
+LEGAL_TEMPLATES = ('terms.html', 'privacy.html', 'dpa.html')
+STUB_MARKERS = ('pending', 'will be added')
+
+
+def render_legal_pages(settings):
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / 'app/templates')), autoescape=True)
+    return [env.get_template(name).render(operator_name=settings.operator_name, operator_address=settings.operator_address)
+            for name in LEGAL_TEMPLATES]
+
+
+def legal_pages_clean(settings):
+    return not any(marker in html for html in render_legal_pages(settings) for marker in STUB_MARKERS)
+
+
+def telegram_summary_recent(db_path, now_utc=None):
+    cutoff = ((now_utc or datetime.now(timezone.utc)) - timedelta(hours=26)).isoformat()
+    with closing(readonly(db_path)) as db:
+        return db.execute("SELECT 1 FROM runs WHERE kind='summary' AND status='ok' AND finished_at>=? LIMIT 1",
+                          (cutoff,)).fetchone() is not None
+
+
+def client_zero_ready(db_path, business_id):
+    if not business_id:
+        return False
+    with closing(readonly(db_path)) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute('SELECT * FROM businesses WHERE id=?', (business_id,)).fetchone()
+    if not row:
+        return False
+    return (len((row['postal_address'] or '').strip()) >= 10
+            and bool(row['smtp_host'] and row['smtp_user'] and row['smtp_password_enc'])
+            and bool(row['imap_host'] and row['imap_user'] and row['imap_password_enc'])
+            and bool((row['brief'] or '').strip()))
+
+
+def _lemonsqueezy_get(api_key):
+    request = Request('https://api.lemonsqueezy.com/v1/users/me',
+                      headers={'Authorization': 'Bearer ' + api_key, 'Accept': 'application/vnd.api+json'})
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read())
+
+
+def lemonsqueezy_live_mode(api_key):
+    """True (live key), False (test key), None when the key's mode cannot be
+    determined (network failure or an unexpected response shape) -- callers
+    must treat None as not-live, never as OK."""
+    try:
+        payload = _lemonsqueezy_get(api_key)
+    except Exception:
+        return None
+    meta = payload.get('meta') if isinstance(payload, dict) else None
+    if not isinstance(meta, dict) or 'test_mode' not in meta:
+        return None
+    return not bool(meta['test_mode'])
+
+
+def launch_check():
+    """Refuse to launch with placeholders. OK/FAIL lines only, never a
+    setting's value, a response body or an exception text. Does not change
+    preflight's own behaviour or run before this is called separately."""
+    failures = []
+
+    def check(name, fn):
+        try:
+            ok = bool(fn())
+        except (OSError, ValueError, KeyError, sqlite3.Error):
+            ok = False
+        print(('OK ' if ok else 'FAIL ') + name)
+        if not ok:
+            failures.append(name)
+
+    try:
+        actual = Path('/opt/evorove/.env').read_text()
+    except OSError:
+        actual = ''
+    values = env_values(actual)
+    settings = Settings(values)
+
+    check('operator identity is set', lambda: bool(values.get('OPERATOR_NAME', '').strip())
+                                        and bool(values.get('OPERATOR_ADDRESS', '').strip()))
+    check('legal pages render with no placeholder text', lambda: legal_pages_clean(settings))
+    token, chat = values.get('TELEGRAM_BOT_TOKEN', '').strip(), values.get('TELEGRAM_CHAT_ID', '').strip()
+    check('Telegram is configured and a summary ran in the last 26 hours',
+          lambda: bool(token and chat) and telegram_summary_recent(settings.db_path))
+    check('client-zero business can send and receive mail',
+          lambda: client_zero_ready(settings.db_path, values.get('CLIENT_ZERO_BUSINESS_ID', '').strip()))
+
+    if values.get('BILLING_TEST_MODE_ALLOWED_EMAILS', '').strip():
+        print('INFO BILLING_TEST_MODE_ALLOWED_EMAILS is set: test payments are still honoured for those accounts')
+
+    api_key = values.get('LEMONSQUEEZY_API_KEY', '').strip()
+    if api_key:
+        check('Lemon Squeezy API key is in live mode', lambda: lemonsqueezy_live_mode(api_key) is True)
+
+    return int(bool(failures))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('check', choices=('preflight', 'smoke', 'backup-check'))
+    parser.add_argument('check', choices=('preflight', 'smoke', 'backup-check', 'launch-check'))
     parser.add_argument('base_url', nargs='?')
     parser.add_argument('--db-path', default='/var/lib/evorove/evorove.sqlite3')
     parser.add_argument('--config', default='/etc/litestream.yml')
@@ -193,6 +298,8 @@ def main():
     try:
         if args.check == 'preflight':
             return preflight()
+        if args.check == 'launch-check':
+            return launch_check()
         if args.check == 'smoke':
             if not args.base_url:
                 parser.error('smoke requires base_url')

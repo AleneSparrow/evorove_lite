@@ -1,4 +1,4 @@
-.PHONY: run test test-browser lint preflight smoke backup-check shellcheck
+.PHONY: run test test-browser lint preflight launch-check smoke backup-check shellcheck
 run:
 	.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers --ssl-keyfile .local/key.pem --ssl-certfile .local/cert.pem --no-access-log
 test:
@@ -11,6 +11,9 @@ test-browser:
 
 preflight:
 	./deploy/preflight.sh
+
+launch-check:
+	.venv/bin/python deploy/checks.py launch-check
 
 smoke:
 	./deploy/smoke.sh "$(BASE_URL)"

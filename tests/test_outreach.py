@@ -626,6 +626,51 @@ def test_a_stopped_persons_older_pending_reply_is_not_retried(settings):
     assert len(smtp.sent) == 1
 
 
+def test_two_unanswered_messages_from_one_person_get_one_reply_and_both_are_handled(settings):
+    make_business(settings)
+    person = make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    older = inbound('First question.', uid=11)
+    newer = inbound('Second, more specific question.', uid=12)
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([older, newer]),
+                                 llm=stub_llm(), now_utc=DAYTIME) == 2
+    assert len(smtp.sent) == 2  # the first letter, plus exactly one reply -- never two
+
+    with connect(settings.db_path) as db:
+        rows = {row['smtp_message_id']: dict(row) for row in db.execute(
+            "SELECT * FROM messages WHERE person_id=? AND direction='in'", (person['id'],))}
+    assert rows[older['message_id']]['reply_processed'] == 1  # marked handled, never answered later
+    stored = messages(settings, person['id'])
+    assert stored[-1]['in_reply_to'] == newer['message_id']  # answered against the newest
+
+
+def test_an_opt_out_in_the_older_of_two_messages_still_stops_contact(settings):
+    make_business(settings)
+    make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    older = inbound('Unsubscribe me.', uid=11)
+    newer = inbound('Actually, tell me more.', uid=12)
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([older, newer]),
+                          llm=stub_llm(), now_utc=DAYTIME)
+    assert people(settings)[0]['stage'] == 'lost'
+    assert len(smtp.sent) == 1  # only the original first letter; no reply to either message
+
+
+def test_a_reply_blocked_by_a_guard_logs_at_most_once_per_owner_local_day(settings):
+    make_business(settings)
+    make_person(settings, us_state='NY')
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound('Tell me more.')]),
+                          llm=stub_llm(), now_utc=EVENING)
+    for _ in range(9):  # ten polls total, five minutes apart, same owner-local day
+        outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([]), llm=stub_llm(), now_utc=EVENING)
+    assert log_events(settings).count(('reply_blocked', 'quiet_hours')) == 1
+    assert len(smtp.sent) == 1  # still never answered
+
+
 def test_the_first_poll_only_records_where_the_inbox_is(settings):
     make_business(settings)
     make_person(settings)

@@ -47,7 +47,8 @@ def test_legal_pages_describe_the_current_product(client):
     assert '$199' not in terms and '$499' not in terms
     assert 'Refunds follow Lemon Squeezy' in terms
     assert 'aggregate liability is limited to the amount you paid for the subscription in the three months before the event' in terms
-    assert 'This section will be added. It will state the governing law and the venue.' in terms
+    assert 'governed by the laws of the State of Delaware' in terms
+    assert 'state or federal courts located in Delaware' in terms
     assert 'until the end of the period already paid' in terms
     assert 'The AI writes each outreach email on your behalf.' in terms
     assert 'basis for emailing each person' in terms

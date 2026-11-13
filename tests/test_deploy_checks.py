@@ -9,6 +9,9 @@ from threading import Thread
 
 import pytest
 
+from app.db import connect, migrate, now
+from app.settings import Settings as AppSettings, encrypt_password
+
 spec = importlib.util.spec_from_file_location('deploy_checks', Path(__file__).parents[1] / 'deploy/checks.py')
 checks = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checks)
@@ -238,3 +241,146 @@ def test_smoke_paths_match_main_routes():
             path.startswith(mount + '/') for mount in mounts))
     assert ('/faq', 'GET') in routes and ('/terms', 'GET') in routes
     assert all(path != '/pricing' for path, _, _ in checks.SMOKE_REQUESTS)
+
+
+# --- launch-check ------------------------------------------------------------
+
+def ready_db(db_path, **business_overrides):
+    migrate(str(db_path))
+    cipher_settings = AppSettings({'DB_PATH': str(db_path), 'SECRET_KEY': 'k' * 32})
+    fields = {'id': 'cz', 'name': 'Acme', 'created_at': now(),
+              'postal_address': '100 Main Street, Austin, TX 78701',
+              'smtp_host': 'smtp.example.com', 'smtp_user': 'sales@acme.example',
+              'smtp_password_enc': encrypt_password(cipher_settings, 'smtp-secret'),
+              'imap_host': 'imap.example.com', 'imap_user': 'sales@acme.example',
+              'imap_password_enc': encrypt_password(cipher_settings, 'imap-secret'),
+              'brief': 'US dental clinics'}
+    fields.update(business_overrides)
+    with connect(str(db_path)) as db:
+        db.execute('INSERT INTO businesses({}) VALUES ({})'.format(
+            ','.join(fields), ','.join('?' * len(fields))), tuple(fields.values()))
+        db.execute("INSERT INTO runs(id,business_id,kind,started_at,finished_at,status) VALUES "
+                   "('r1',NULL,'summary',?,?,'ok')", (now(), now()))
+
+
+def ready_env(db_path, **overrides):
+    values = {'OPERATOR_NAME': 'Alena K', 'OPERATOR_ADDRESS': '1 Main St, Austin, TX',
+              'TELEGRAM_BOT_TOKEN': 'telegram-token-do-not-print',
+              'TELEGRAM_CHAT_ID': 'telegram-chat-do-not-print',
+              'CLIENT_ZERO_BUSINESS_ID': 'cz', 'DB_PATH': str(db_path)}
+    values.update(overrides)
+    return '\n'.join(f'{key}={value}' for key, value in values.items() if value is not None)
+
+
+def patch_env(monkeypatch, text):
+    original = Path.read_text
+
+    def read(self, *args, **kwargs):
+        if str(self) == '/opt/evorove/.env':
+            return text
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read)
+
+
+def test_launch_check_passes_when_everything_is_ready(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path)
+    patch_env(monkeypatch, ready_env(db_path))
+    assert checks.launch_check() == 0
+    assert 'FAIL' not in capsys.readouterr().out
+
+
+def test_launch_check_fails_when_operator_identity_is_missing(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path)
+    patch_env(monkeypatch, ready_env(db_path, OPERATOR_NAME='', OPERATOR_ADDRESS=''))
+    assert checks.launch_check() == 1
+    output = capsys.readouterr().out
+    assert 'FAIL operator identity is set' in output
+    assert 'FAIL legal pages render with no placeholder text' in output  # the stub wording leaks through
+
+
+def test_launch_check_fails_when_a_legal_page_still_has_stub_text(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path)
+    patch_env(monkeypatch, ready_env(db_path))
+    monkeypatch.setattr(checks, 'render_legal_pages', lambda settings: ['This section will be added.'])
+    assert checks.launch_check() == 1
+    output = capsys.readouterr().out
+    assert 'FAIL legal pages render with no placeholder text' in output
+    assert 'OK operator identity is set' in output
+
+
+@pytest.mark.parametrize('overrides', [{'TELEGRAM_BOT_TOKEN': ''}, {'TELEGRAM_CHAT_ID': ''}])
+def test_launch_check_fails_when_telegram_is_not_fully_configured(tmp_path, monkeypatch, capsys, overrides):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path)
+    patch_env(monkeypatch, ready_env(db_path, **overrides))
+    assert checks.launch_check() == 1
+    assert 'FAIL Telegram is configured and a summary ran in the last 26 hours' in capsys.readouterr().out
+
+
+def test_launch_check_fails_when_no_summary_ran_recently(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path)
+    with connect(str(db_path)) as db:
+        db.execute("UPDATE runs SET finished_at=? WHERE id='r1'",
+                  ((checks.datetime.now(checks.timezone.utc) - checks.timedelta(hours=30)).isoformat(),))
+    patch_env(monkeypatch, ready_env(db_path))
+    assert checks.launch_check() == 1
+    assert 'FAIL Telegram is configured and a summary ran in the last 26 hours' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('overrides', [{'postal_address': '12 St'}, {'smtp_host': ''}, {'imap_user': ''}, {'brief': ''}])
+def test_launch_check_fails_when_client_zero_is_not_ready(tmp_path, monkeypatch, capsys, overrides):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path, **overrides)
+    patch_env(monkeypatch, ready_env(db_path))
+    assert checks.launch_check() == 1
+    assert 'FAIL client-zero business can send and receive mail' in capsys.readouterr().out
+
+
+def test_launch_check_reports_billing_test_mode_allowlist_as_info_not_failure(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path)
+    patch_env(monkeypatch, ready_env(db_path, BILLING_TEST_MODE_ALLOWED_EMAILS='owner@example.test'))
+    assert checks.launch_check() == 0
+    output = capsys.readouterr().out
+    assert 'INFO BILLING_TEST_MODE_ALLOWED_EMAILS is set' in output
+    assert 'FAIL' not in output
+
+
+@pytest.mark.parametrize('test_mode,expected', [(True, 1), (False, 0)])
+def test_launch_check_lemonsqueezy_key_mode(tmp_path, monkeypatch, capsys, test_mode, expected):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path)
+    patch_env(monkeypatch, ready_env(db_path, LEMONSQUEEZY_API_KEY='secret-ls-key'))
+    monkeypatch.setattr(checks, '_lemonsqueezy_get', lambda api_key: {'meta': {'test_mode': test_mode}})
+    assert checks.launch_check() == expected
+    output = capsys.readouterr().out
+    assert ('FAIL Lemon Squeezy API key is in live mode' in output) is test_mode
+    assert 'secret-ls-key' not in output
+
+
+def test_launch_check_lemonsqueezy_mode_undetermined_fails(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path)
+    patch_env(monkeypatch, ready_env(db_path, LEMONSQUEEZY_API_KEY='secret-ls-key'))
+    monkeypatch.setattr(checks, '_lemonsqueezy_get', lambda api_key: (_ for _ in ()).throw(OSError('no network')))
+    assert checks.launch_check() == 1
+    output = capsys.readouterr().out
+    assert 'FAIL Lemon Squeezy API key is in live mode' in output
+    assert 'no network' not in output
+
+
+def test_launch_check_never_prints_setting_values(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / 'launch.sqlite3'
+    ready_db(db_path, postal_address='')
+    patch_env(monkeypatch, ready_env(db_path, OPERATOR_NAME='', OPERATOR_ADDRESS='',
+                                      TELEGRAM_BOT_TOKEN='', TELEGRAM_CHAT_ID=''))
+    checks.launch_check()
+    output = capsys.readouterr().out
+    assert 'telegram-token-do-not-print' not in output
+    assert 'telegram-chat-do-not-print' not in output
+    assert 'Alena K' not in output and '1 Main St' not in output
