@@ -21,6 +21,14 @@ from .settings import load
 
 log = logging.getLogger(__name__)
 
+
+def log_redacted(message, exc):
+    """Keep the stack location in the process log, but an exception's own
+    message may carry provider data or secrets, so never pass it through."""
+    safe_error = RuntimeError("Exception details redacted")
+    log.error(message, type(exc).__name__, exc_info=(RuntimeError, safe_error, exc.__traceback__))
+
+
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -112,10 +120,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
 
     @app.exception_handler(Exception)
     async def unhandled_error(request: Request, exc: Exception):
-        # Keep stack locations, but exception messages may contain provider data/secrets.
-        safe_error = RuntimeError("Exception details redacted")
-        log.error("Unhandled %s", type(exc).__name__,
-                  exc_info=(RuntimeError, safe_error, exc.__traceback__))
+        log_redacted("Unhandled %s", exc)
         return error_page(request, 500)
 
     @app.middleware("http")
@@ -352,8 +357,8 @@ def create_app(settings=None, *, scheduler_enabled=True):
                     people = await asyncio.to_thread(search.run_search, bid, limit=20, dry_run=True)
                     request.app.state.search_previews[bid] = {'status': 'ok', 'people': people}
                 except Exception as exc:
-                    request.app.state.search_previews[bid] = {
-                        'status': 'failed', 'people': [], 'error': type(exc).__name__}
+                    log_redacted("Search preview failed: %s", exc)
+                    request.app.state.search_previews[bid] = {'status': 'failed', 'people': []}
 
             task = asyncio.create_task(execute_preview())
             request.app.state.search_preview_tasks.add(task)

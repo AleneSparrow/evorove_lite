@@ -197,7 +197,9 @@ def test_search_preview_failure_hides_exception_message(client, settings, monkey
         await asyncio.gather(*list(client.app.state.search_preview_tasks))
     client.portal.call(finish)
     page = client.get('/app/search-preview')
-    assert 'Preview failed (RuntimeError)' in page.text
+    assert "Couldn't build the preview. Try again in a minute." in page.text
+    # Neither the exception's class name nor its message ever reaches the UI.
+    assert 'RuntimeError' not in page.text
     assert 'SECRET-MUST-NOT-LEAK' not in page.text
 
 
