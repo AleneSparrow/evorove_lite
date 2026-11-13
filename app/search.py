@@ -81,7 +81,10 @@ OFFER_SCHEMA = {"type": "object", "additionalProperties": False, "required": [
         **{field: {"type": "string"} for field in (
             "product_quote", "product_source", "price_quote", "price_source", "place_quote", "place_source",
             "promotion_quote", "promotion_source")},
-        "segments": {"type": "array", "minItems": 2, "maxItems": 3, "items": {
+        # No minItems/maxItems here: Anthropic's structured outputs only accepts
+        # 0 or 1 on an array, and rejects the whole request (400) otherwise. The
+        # 2-3 count is enforced in Python, after the response -- see _read_offer.
+        "segments": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
             "required": ["label", "evidence_quote", "source_name", "channel"],
             "properties": {"label": {"type": "string"}, "evidence_quote": {"type": "string"},

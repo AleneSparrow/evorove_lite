@@ -357,3 +357,58 @@ def test_ungrounded_segments_do_not_search(db, monkeypatch):
     assert len(messages.calls) == 1
     assert search_run(db)["error"] == "OfferRejected"
     assert people(db) == []
+
+
+# --- the 2-3 segment count, enforced in Python now that the schema sent to
+# the model carries no minItems/maxItems (see app/search.py:OFFER_SCHEMA) ----
+
+def test_more_than_three_grounded_segments_are_truncated_to_three(monkeypatch):
+    body = (
+        "Owners of plumbing companies still book jobs by phone. "
+        "Field service owners rely on paper schedules for everything. "
+        "Rural contractors miss calls during drive time every day. "
+        "Small shops still use a shared paper calendar for bookings. "
+        "This covers field-service scheduling for small teams."
+    )
+    offer = {
+        "product_quote": "field-service scheduling", "product_source": "brief",
+        "price_quote": "", "price_source": "", "place_quote": "", "place_source": "",
+        "promotion_quote": "", "promotion_source": "",
+        "segments": [
+            {"label": "US plumbing company owners",
+             "evidence_quote": "Owners of plumbing companies still book jobs by phone.",
+             "source_name": "brief", "channel": "business_listing"},
+            {"label": "Field service owners",
+             "evidence_quote": "Field service owners rely on paper schedules for everything.",
+             "source_name": "brief", "channel": "industry_sites"},
+            {"label": "Rural contractors",
+             "evidence_quote": "Rural contractors miss calls during drive time every day.",
+             "source_name": "brief", "channel": "forums"},
+            {"label": "Small shops",
+             "evidence_quote": "Small shops still use a shared paper calendar for bookings.",
+             "source_name": "brief", "channel": "news"},
+        ],
+    }
+    monkeypatch.setattr(search, "ask", lambda *a, **k: offer)
+    facts, segments, forbidden = search._read_offer([("brief", body)])
+    assert facts["product"] == "field-service scheduling"
+    assert len(segments) == 3
+    assert [item["label"] for item in segments] == [
+        "US plumbing company owners", "Field service owners", "Rural contractors"]
+
+
+def test_fewer_than_two_grounded_segments_is_a_clear_rejection(monkeypatch):
+    offer = {
+        "product_quote": "field-service scheduling", "product_source": "brief",
+        "price_quote": "", "price_source": "", "place_quote": "", "place_source": "",
+        "promotion_quote": "", "promotion_source": "",
+        "segments": [
+            {"label": "US plumbing company owners",
+             "evidence_quote": "Owners of plumbing companies still book jobs by phone.",
+             "source_name": "brief", "channel": "business_listing"},
+        ],
+    }
+    monkeypatch.setattr(search, "ask", lambda *a, **k: offer)
+    body = "Owners of plumbing companies still book jobs by phone. This covers field-service scheduling."
+    with pytest.raises(search.OfferRejected):
+        search._read_offer([("brief", body)])

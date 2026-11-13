@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
@@ -25,11 +25,23 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
-    "Cache-Control": "no-store",
     "Strict-Transport-Security": "max-age=31536000",
     "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=(), usb=()",
     "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; form-action 'self' https://*.lemonsqueezy.com",
 }
+
+
+def static_cache_control(path):
+    """no-store stays the rule for HTML/API; a cacheable path (favicon, a
+    static asset) gets a real Cache-Control instead, so fonts and CSS are
+    not re-downloaded on every page load."""
+    if path == "/favicon.ico":
+        return "public, max-age=604800"
+    if not path.startswith("/static/"):
+        return "no-store"
+    if path == "/static/style.css":
+        return "public, max-age=3600"
+    return "public, max-age=31536000, immutable"
 
 
 def canonical_host(settings):
@@ -76,10 +88,11 @@ def create_app(settings=None, *, scheduler_enabled=True):
 
     app = FastAPI(lifespan=lifespan)
     templates = Jinja2Templates(directory=str(ROOT / "app/templates"))
+    templates.env.filters["relative_time"] = board.relative_time
     app.mount("/static", StaticFiles(directory=ROOT / "app/static"), name="static")
 
-    def apply_security_headers(response):
-        response.headers.update(SECURITY_HEADERS)
+    def apply_security_headers(response, cache_control="no-store"):
+        response.headers.update({**SECURITY_HEADERS, "Cache-Control": cache_control})
         return response
 
     def error_page(request, status):
@@ -114,7 +127,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
             if request.url.query:
                 target += "?" + request.url.query
             return apply_security_headers(RedirectResponse(target, status_code=301))
-        return apply_security_headers(await call_next(request))
+        return apply_security_headers(await call_next(request), static_cache_control(request.url.path))
 
     def render(request, template, **context):
         s = request.app.state.settings
@@ -148,6 +161,11 @@ def create_app(settings=None, *, scheduler_enabled=True):
         if origin == "null" or (origin and origin.rstrip("/") not in allowed_origins(request.app.state.settings)):
             raise HTTPException(403, "Invalid origin")
         return fields
+
+    @app.get("/favicon.ico")
+    def favicon():
+        # Browsers and bots request this at the root regardless of any <link>.
+        return FileResponse(ROOT / "app/static/favicon.ico", media_type="image/x-icon")
 
     @app.get("/health")
     def health(request: Request):
