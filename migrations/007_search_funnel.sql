@@ -1,0 +1,2 @@
+ALTER TABLE runs ADD COLUMN funnel TEXT;
+ALTER TABLE people ADD COLUMN email_kind TEXT;

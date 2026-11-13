@@ -1,7 +1,11 @@
 """Cycle 1: brief to a grounded Cold person. One web-search pass, then the company's own site."""
 import ipaddress
+import json
+import logging
+import math
 import re
 import sqlite3
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -10,6 +14,7 @@ from .db import connect, current_run_id, now
 from .llm import BudgetExhausted, LLMRejected, ask, source_text
 from .settings import load
 
+log = logging.getLogger(__name__)
 last_report = ""
 CHANNELS = {"forums", "industry_sites", "news", "business_listing"}
 # Copied from evorove_lead/owner-materials/service.txt (25 Oct 2026). Client 0 only.
@@ -55,7 +60,31 @@ will would can could should may might must
 still every each all any some such very just also too already often always never
 here there when where who whom whose which what how why
 """.split())
-PAGE_PATHS = ("", "/about", "/team", "/contact")
+PAGE_PATHS = ("", "/about", "/team", "/contact", "/about-us", "/contact-us", "/our-team", "/meet-the-team")
+# Only these look like a page that would actually say who owns the place --
+# used by _role_from_pages, not by the general page fetch above.
+ABOUT_TEAM_SUFFIXES = ("/about", "/team", "/about-us", "/our-team", "/meet-the-team")
+
+# Every way a candidate can fall out of the funnel, in a sentence a human asked
+# for -- never the key itself. "returned" and "accepted" are not rejections and
+# have no phrase. Order does not matter: the most frequent one wins.
+FUNNEL_REASONS = {
+    "no_state": "none were in a US state we could identify",
+    "no_website": "none had a usable website",
+    "same_as_us": "none were a different company from yours",
+    "bad_segment": "none matched one of your segments",
+    "site_unreachable": "none had a site we could reach",
+    "llm_no_person": "none had a decision-maker we could read",
+    "no_quote": "none had a usable quote",
+    "quote_not_on_page": "none had evidence we could find on their own site",
+    "email_not_on_page": "none had an email we could find on their own site",
+    "email_generic_or_free": "none had an email we could trust",
+    "email_other_domain": "none had a public owner email",
+    "no_role": "none had an owner or founder we could identify",
+    "pain_not_grounded": "none had a pain we could tie to the evidence",
+    "pain_invented": "none had a pain the evidence actually supports",
+    "duplicate_or_suppressed": "none were new -- already on your board or suppressed",
+}
 
 
 class OfferRejected(Exception):
@@ -170,21 +199,53 @@ def _person_name(value, company):
 
 
 def _pain_grounded(pain, quote):
-    """Nouns and verbs left after the stop list must occur in the evidence quote."""
+    """Nouns and verbs left after the stop list must mostly occur in the
+    evidence quote: at least 60%, and all of them below 2 keywords (too few
+    to apply a percentage to honestly)."""
     keywords = [word.casefold() for word in re.findall(r"[A-Za-z]+", pain) if len(word) > 1 and word.casefold() not in PAIN_STOP]
     if not keywords:
         return False
     folded = quote.casefold()
-    return all(re.search(r"\b" + re.escape(word) + r"\b", folded) for word in keywords)
+    matched = sum(1 for word in keywords if re.search(r"\b" + re.escape(word) + r"\b", folded))
+    if len(keywords) < 2:
+        return matched == len(keywords)
+    return matched >= max(2, math.ceil(len(keywords) * 0.6))
 
 
-def _own_email(email, website):
+def _email_kind(email, website):
+    """None when the domain disqualifies the email outright. Otherwise the
+    email_kind to store: "" for the classic owner@company-domain address,
+    "company" for a generic mailbox (info@, hello@, ...) on the company's
+    own domain, "personal_free" for a personal address at a free provider --
+    a small business's owner using their own gmail is normal, and the caller
+    has already confirmed the address is written on the company's own site
+    before asking here."""
     local, _, domain = email.partition("@")
     domain = domain.lower().removeprefix("www.")
     host = _host(website)
-    if not local or local in GENERIC or domain in FREE_MAIL:
-        return False
-    return bool(host) and (host == domain or host.endswith("." + domain))
+    generic = local in GENERIC
+    if host and (domain == host or domain.endswith("." + host)):
+        return "company" if generic else ""
+    if domain in FREE_MAIL and not generic:
+        return "personal_free"
+    return None
+
+
+def _role_from_pages(pages, name):
+    """When the model's own `role` text names no title, fall back to the
+    /about or /team page: a role keyword written near the person's own name
+    is accepted the same as if the model had named it."""
+    if not name:
+        return None
+    for url, text in pages:
+        if not url.endswith(ABOUT_TEAM_SUFFIXES):
+            continue
+        for match in re.finditer(re.escape(name), text, re.I):
+            window = text[max(0, match.start() - 120):match.end() + 120]
+            found = ROLE_RE.search(window)
+            if found:
+                return found.group(0)
+    return None
 
 
 def materials_for(business, settings):
@@ -294,26 +355,46 @@ def _pages(website):
     return pages
 
 
-def _accept_person(parsed, pages, website, corpus, listed_url, company):
+def _accept_person(parsed, pages, website, corpus, listed_url, company, funnel):
     quote = str(parsed.get("evidence_quote") or "").strip()
     if not quote or len(quote) > 800:
+        funnel["no_quote"] += 1
         return None
     page = "\n".join(text for _, text in pages)
     source_url = next((url for url, text in pages if quote in text), "")
     if not source_url and quote in corpus:
         source_url = _site(listed_url)
+    if not source_url:
+        funnel["quote_not_on_page"] += 1
+        return None
     email = str(parsed.get("email") or "").strip().lower().strip(".")
-    role = ROLE_RE.search(str(parsed.get("role") or ""))
+    if not email or email not in page.lower():
+        funnel["email_not_on_page"] += 1
+        return None
+    kind = _email_kind(email, website)
+    if kind is None:
+        local, _, domain = email.partition("@")
+        domain = domain.lower().removeprefix("www.")
+        funnel["email_generic_or_free" if local in GENERIC or domain in FREE_MAIL else "email_other_domain"] += 1
+        return None
+    name = _person_name(parsed.get("name"), company)
+    role_match = ROLE_RE.search(str(parsed.get("role") or ""))
+    role = role_match.group(0) if role_match else _role_from_pages(pages, name)
+    if not role:
+        funnel["no_role"] += 1
+        return None
     pain = _one_sentence(parsed.get("pain"))
-    if not source_url or email not in page.lower() or not _own_email(email, website):
+    if not pain or not _pain_grounded(pain, quote):
+        funnel["pain_not_grounded"] += 1
         return None
-    if not role or not pain or not _pain_grounded(pain, quote) or _invented(pain, page + "\n" + corpus):
+    if _invented(pain, page + "\n" + corpus):
+        funnel["pain_invented"] += 1
         return None
-    return {"name": _person_name(parsed.get("name"), company), "role": role.group(0), "email": email, "pain": pain,
+    return {"name": name, "role": role, "email": email, "email_kind": kind, "pain": pain,
             "evidence_quote": quote, "source_url": source_url}
 
 
-def _person(company, pages, website, corpus, forbidden, listed_url):
+def _person(company, pages, website, corpus, forbidden, listed_url, funnel):
     remaining, blocks = 6000, []
     for url, text in pages:
         chunk = text[:remaining]
@@ -325,24 +406,38 @@ def _person(company, pages, website, corpus, forbidden, listed_url):
     try:
         parsed = ask(_prompt("search_people.md"), user, schema=PERSON_SCHEMA, purpose="decision_maker")
     except LLMRejected:
+        funnel["llm_no_person"] += 1
         return None
-    return _accept_person(parsed, pages, website, corpus, listed_url, company)
+    return _accept_person(parsed, pages, website, corpus, listed_url, company, funnel)
 
 
-def _candidate(business, item, segments, corpus, forbidden):
+def _candidate(business, item, segments, corpus, forbidden, funnel):
     state = _us_state(item.get("us_state"))
     website = _site(item.get("website"))
     company = " ".join(str(item.get("company") or "").split())
     labels = {segment["label"].casefold(): segment["label"] for segment in segments}
     segment = labels.get(str(item.get("segment") or "").strip().casefold())
-    if not state or not website or not company or company.casefold() == (business["name"] or "").casefold() or not segment:
+    if not state:
+        funnel["no_state"] += 1
+        return None
+    if not website:
+        funnel["no_website"] += 1
+        return None
+    # An empty company name is as unusable as one that is plainly ours: either
+    # way this is not a distinct real company to write to.
+    if not company or company.casefold() == (business["name"] or "").casefold():
+        funnel["same_as_us"] += 1
+        return None
+    if not segment:
+        funnel["bad_segment"] += 1
         return None
     pages = _pages(website)
     if not pages:
+        funnel["site_unreachable"] += 1
         return None
-    person = _person(company, pages, website, corpus, forbidden, item.get("source_url"))
+    person = _person(company, pages, website, corpus, forbidden, item.get("source_url"), funnel)
     if not person:
-        return None
+        return None  # _person/_accept_person already recorded the specific reason
     person.update({"company": company, "website": website, "us_state": state, "segment": segment})
     return person
 
@@ -358,10 +453,10 @@ def _kept(settings, business_id, person, dry_run):
             return True
         stamp = now()
         try:
-            db.execute("INSERT INTO people (id,business_id,name,role,email,company,website,us_state,segment,pain,evidence_quote,source_url,stage,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (str(uuid4()), business_id, person["name"], person["role"], email, person["company"], person["website"],
-                        person["us_state"], person["segment"], person["pain"], person["evidence_quote"], person["source_url"],
-                        "cold", stamp, stamp))
+            db.execute("INSERT INTO people (id,business_id,name,role,email,email_kind,company,website,us_state,segment,pain,evidence_quote,source_url,stage,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (str(uuid4()), business_id, person["name"], person["role"], email, person.get("email_kind") or "",
+                        person["company"], person["website"], person["us_state"], person["segment"], person["pain"],
+                        person["evidence_quote"], person["source_url"], "cold", stamp, stamp))
         except sqlite3.IntegrityError:
             return False
     return True
@@ -377,9 +472,10 @@ def markdown_table(rows):
     return "\n".join(lines)
 
 
-def _finish(settings, run_id, status, found, error):
+def _finish(settings, run_id, status, found, error, funnel):
     with connect(settings.db_path) as db:
-        db.execute("UPDATE runs SET status=?, found=?, error=?, finished_at=? WHERE id=?", (status, found, error, now(), run_id))
+        db.execute("UPDATE runs SET status=?, found=?, error=?, funnel=?, finished_at=? WHERE id=?",
+                   (status, found, error, json.dumps(funnel), now(), run_id))
 
 
 def _open_run(settings, business_id):
@@ -391,6 +487,7 @@ def _open_run(settings, business_id):
 
 def _collect(settings, business, limit, dry_run):
     accepted = []
+    funnel = Counter()
     try:
         rows = materials_for(business, settings)
         if not rows:
@@ -407,16 +504,21 @@ def _collect(settings, business, limit, dry_run):
         for item in list(payload.get("candidates") or [])[:limit * 3]:
             if len(accepted) >= limit:
                 break
+            funnel["returned"] += 1
             if not isinstance(item, dict):
                 continue
-            person = _candidate(business, item, segments, corpus, forbidden)
-            if not person or person["email"] in seen or not _kept(settings, business["id"], person, dry_run):
+            person = _candidate(business, item, segments, corpus, forbidden, funnel)
+            if not person:
+                continue  # the specific reason is already in funnel
+            if person["email"] in seen or not _kept(settings, business["id"], person, dry_run):
+                funnel["duplicate_or_suppressed"] += 1
                 continue
             seen.add(person["email"])
             accepted.append(person)
+            funnel["accepted"] += 1
     except BudgetExhausted:
-        return accepted, True
-    return accepted, False
+        return accepted, True, funnel
+    return accepted, False, funnel
 
 
 def run_search(business_id: str, *, limit: int = 20, dry_run: bool = False) -> list[dict]:
@@ -433,25 +535,28 @@ def run_search(business_id: str, *, limit: int = 20, dry_run: bool = False) -> l
     if owned:
         run_id = _open_run(settings, business_id)
         token = current_run_id.set(run_id)
-    accepted = []
+    accepted, funnel = [], Counter()
     try:
-        accepted, stopped = _collect(settings, business, limit, dry_run) if limit >= 1 else ([], False)
+        accepted, stopped, funnel = _collect(settings, business, limit, dry_run) if limit >= 1 else ([], False, Counter())
         if stopped:
             if owned:
-                _finish(settings, run_id, "budget_stopped", len(accepted), None)
+                _finish(settings, run_id, "budget_stopped", len(accepted), None, funnel)
             else:
                 with connect(settings.db_path) as db:
-                    db.execute("UPDATE runs SET status='budget_stopped', found=? WHERE id=?", (len(accepted), run_id))
+                    db.execute("UPDATE runs SET status='budget_stopped', found=?, funnel=? WHERE id=?",
+                               (len(accepted), json.dumps(funnel), run_id))
             return accepted
         if owned:
-            _finish(settings, run_id, "ok", len(accepted), None)
+            _finish(settings, run_id, "ok", len(accepted), None, funnel)
         return accepted
     except Exception as exc:
         if owned:
-            _finish(settings, run_id, "failed", len(accepted), type(exc).__name__)
+            _finish(settings, run_id, "failed", len(accepted), type(exc).__name__, funnel)
         raise
     finally:
         if dry_run:
             last_report = markdown_table(accepted)
+        if funnel:
+            log.info("search funnel run=%s %s", run_id, dict(funnel))
         if token is not None:
             current_run_id.reset(token)
