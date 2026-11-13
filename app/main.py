@@ -88,12 +88,43 @@ def create_app(settings=None, *, scheduler_enabled=True):
         response = templates.TemplateResponse(request=request, name=template, context={"code": status}, status_code=status)
         return apply_security_headers(response)
 
+    # HTML form posts. API routes and htmx stay on the JSON / fragment path below.
+    form_pages = {"/login", "/signup", "/forgot-password", "/reset", "/app/settings", "/app/contacts"}
+
+    def form_error_page(request, exc):
+        message = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        path = request.url.path
+        if path in {"/login", "/signup", "/forgot-password", "/reset"}:
+            response = render(
+                request, "auth.html", mode=path.strip("/"), error=message,
+                email=getattr(request.state, "form_email", ""),
+                token=getattr(request.state, "form_token", ""))
+        else:
+            s = request.app.state.settings
+            try:
+                user = auth.current_user(s, request)
+            except HTTPException:
+                return None
+            if path == "/app/settings":
+                response = render(request, "settings.html", error=message,
+                                  business=board.business(s, user["business_id"]))
+            else:
+                response = render(request, "contacts.html", error=message,
+                                  report=None, columns=contacts.COLUMNS)
+        response.status_code = exc.status_code
+        return apply_security_headers(response)
+
     @app.exception_handler(StarletteHTTPException)
     async def http_errors(request: Request, exc: StarletteHTTPException):
         if exc.status_code == 404:
             return error_page(request, 404)
         if exc.status_code == 500:
             return error_page(request, 500)
+        if (request.method == "POST" and exc.status_code in {400, 401, 403, 413, 415, 429}
+                and request.url.path in form_pages and request.headers.get("hx-request") != "true"):
+            page = form_error_page(request, exc)
+            if page is not None:
+                return page
         response = await http_exception_handler(request, exc)
         return apply_security_headers(response)
 
@@ -147,6 +178,11 @@ def create_app(settings=None, *, scheduler_enabled=True):
         origin = request.headers.get("origin")
         if origin == "null" or (origin and origin.rstrip("/") not in allowed_origins(request.app.state.settings)):
             raise HTTPException(403, "Invalid origin")
+        # Kept for the error page only. The password is never stored or logged.
+        if request.url.path in {"/login", "/signup", "/forgot-password"}:
+            request.state.form_email = fields.get("email", "")
+        elif request.url.path == "/reset":
+            request.state.form_token = fields.get("token", "")
         return fields
 
     @app.get("/health")

@@ -21,6 +21,21 @@ def test_signup_in_chromium(page, live_app):
     expect(page.get_by_role('heading', name='Browser acceptance', exact=True)).to_be_visible()
 
 
+def test_password_toggle_switches_the_input_type(page, live_app):
+    base, _, _ = live_app
+    page.goto(base + '/login')
+    field = page.get_by_label('Password', exact=True)
+    expect(field).to_have_attribute('type', 'password')
+    page.get_by_role('button', name='Show password', exact=True).click()
+    expect(field).to_have_attribute('type', 'text')
+    hide = page.get_by_role('button', name='Hide password', exact=True)
+    expect(hide).to_have_attribute('aria-pressed', 'true')
+    expect(page).to_have_url(base + '/login')
+    hide.click()
+    expect(field).to_have_attribute('type', 'password')
+    expect(page.get_by_role('button', name='Show password', exact=True)).to_have_attribute('aria-pressed', 'false')
+
+
 def test_login_in_chromium(page, live_app):
     base, _, _ = live_app
     register(page, base)

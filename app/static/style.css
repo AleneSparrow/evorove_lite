@@ -265,3 +265,12 @@ body.error-page main{flex:1;display:flex;align-items:center;width:100%}
 .error-panel h1,.error-panel p{margin:0;max-width:100%}
 .error-panel h1{overflow-wrap:break-word}
 .error-panel p{max-width:36ch;color:var(--muted)}
+.form-error{margin:0 0 16px;padding:12px 14px;background:var(--inset);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;color:var(--text);font-size:14px;line-height:1.5}
+.password-field{position:relative;display:block;margin-top:8px}
+.password-field input{margin-top:0;padding-right:48px}
+button.password-toggle:not([hidden]){position:absolute;top:50%;right:6px;transform:translateY(-50%);width:36px;height:36px;min-height:36px;padding:0;background:transparent;color:var(--muted);border-radius:6px}
+button.password-toggle:not([hidden]):hover,button.password-toggle:not([hidden])[aria-pressed="true"]{background:transparent;color:var(--accent)}
+button.password-toggle .eye-shut{display:none}
+button.password-toggle[aria-pressed="true"] .eye-open{display:none}
+button.password-toggle[aria-pressed="true"] .eye-shut{display:block}
+button.password-toggle svg{display:block}

@@ -59,7 +59,10 @@ def test_unhandled_error_is_a_calm_page_without_the_cause(settings, caplog):
         assert failed.headers['content-security-policy'].startswith("default-src 'self'")
         denied = browser.post('/signup', data={'email': 'x@example.com'})
         assert denied.status_code == 403
-        assert denied.headers['content-type'].startswith('application/json')
+        assert 'text/html' in denied.headers['content-type']
+        assert 'role="alert"' in denied.text
+        assert 'Reload the page and try again' in denied.text
+        assert '{"detail"' not in denied.text
 
     records = [record for record in caplog.records if record.name == 'app.main']
     assert records and records[0].exc_info is not None
