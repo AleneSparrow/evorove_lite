@@ -1,12 +1,13 @@
 """Cycle 2 end to end on a fake SMTP, a fake IMAP and a stub LLM. No network."""
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from uuid import uuid4
 
 import pytest
 
 from app import billing, guards, outreach
-from app.db import connect
+from app.db import connect, now
 from test_guards import DAYTIME, EVENING, add_out_messages, make_business, make_person, settings  # noqa: F401
 
 
@@ -28,11 +29,14 @@ class FakeSmtp:
 
 
 def stub_llm(analysis=None, body=None, error=None):
-    """Stands in for llm.ask: one canned answer per purpose."""
-    calls = []
+    """Stands in for llm.ask: one canned answer per purpose. `.calls` is the
+    purposes asked, in order; `.requests` is the parsed `user` payload for
+    each of those calls, for inspecting what THREAD the model received."""
+    calls, requests = [], []
 
     def ask(system, user, *, schema=None, web_search=False, max_uses=5, purpose):
         calls.append(purpose)
+        requests.append(json.loads(user))
         if error:
             raise error
         if purpose == 'sales_analysis':
@@ -40,7 +44,7 @@ def stub_llm(analysis=None, body=None, error=None):
                          'ready': False, 'hostile': False, 'requires_human': False}, **(analysis or {}))
         return {'body': body if body is not None else 'Thanks — what is slowest for you today?'}
 
-    ask.calls = calls
+    ask.calls, ask.requests = calls, requests
     return ask
 
 
@@ -88,6 +92,15 @@ def messages(settings, person_id=None):
 def log_events(settings):
     with connect(settings.db_path) as db:
         return [(row[0], row[1]) for row in db.execute('SELECT event,detail FROM log ORDER BY id')]
+
+
+def insert_message(settings, person_id, direction, body, *, subject=''):
+    """A synthetic thread message, stored directly, for building a long
+    conversation faster than a full send/poll cycle would."""
+    with connect(settings.db_path) as db:
+        db.execute('INSERT INTO messages(id,person_id,direction,subject,body,smtp_message_id,created_at)'
+                   ' VALUES (?,?,?,?,?,?,?)',
+                   (str(uuid4()), person_id, direction, subject, body, str(uuid4()), now()))
 
 
 # --- the first letter -------------------------------------------------------
@@ -626,23 +639,116 @@ def test_a_stopped_persons_older_pending_reply_is_not_retried(settings):
     assert len(smtp.sent) == 1
 
 
-def test_two_unanswered_messages_from_one_person_get_one_reply_and_both_are_handled(settings):
+def test_two_different_messages_in_one_poll_get_two_replies_in_arrival_order(settings):
     make_business(settings)
     person = make_person(settings)
     smtp = FakeSmtp()
     outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
-    older = inbound('First question.', uid=11)
-    newer = inbound('Second, more specific question.', uid=12)
-    assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([older, newer]),
-                                 llm=stub_llm(), now_utc=DAYTIME) == 2
-    assert len(smtp.sent) == 2  # the first letter, plus exactly one reply -- never two
-
-    with connect(settings.db_path) as db:
-        rows = {row['smtp_message_id']: dict(row) for row in db.execute(
-            "SELECT * FROM messages WHERE person_id=? AND direction='in'", (person['id'],))}
-    assert rows[older['message_id']]['reply_processed'] == 1  # marked handled, never answered later
+    first = inbound('What does this cost?', uid=11)
+    second = inbound('Actually, how does onboarding work?', uid=12)
+    llm = stub_llm()
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([first, second]),
+                                 llm=llm, now_utc=DAYTIME) == 2
+    assert len(smtp.sent) == 3  # the greet, plus one reply to each -- never one
     stored = messages(settings, person['id'])
-    assert stored[-1]['in_reply_to'] == newer['message_id']  # answered against the newest
+    assert [row['direction'] for row in stored] == ['out', 'in', 'out', 'in', 'out']
+    assert stored[2]['in_reply_to'] == first['message_id']
+    assert stored[4]['in_reply_to'] == second['message_id']
+
+    # llm.requests, in order: [analysis-1, reply-1, analysis-2, reply-2]
+    second_analysis, second_reply = llm.requests[2], llm.requests[3]
+    for request in (second_analysis, second_reply):
+        assert [item['from'] for item in request['THREAD']] == ['us', 'them', 'us', 'them']
+        assert request['THREAD'][-1]['body'] == 'Actually, how does onboarding work?'
+        # the reply just sent to the first message is already in the second call's thread
+        assert request['THREAD'][2]['from'] == 'us' and request['THREAD'][2]['body'] == smtp.bodies[1].split('\n\n--\n')[0]
+
+
+def test_thread_has_greet_and_both_sides_oldest_first_for_analysis_and_reply(settings):
+    make_business(settings)
+    make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    outreach.poll_replies('biz-1', settings=settings, send=smtp,
+                          fetch=fake_imap([inbound('What does this cost?', uid=11)]),
+                          llm=stub_llm(), now_utc=DAYTIME)
+    llm = stub_llm()
+    outreach.poll_replies('biz-1', settings=settings, send=smtp,
+                          fetch=fake_imap([inbound('Actually, tell me about onboarding.', uid=12)]),
+                          llm=llm, now_utc=DAYTIME)
+    for request in (llm.requests[0], llm.requests[1]):  # analysis, then reply
+        thread = request['THREAD']
+        assert [item['from'] for item in thread] == ['us', 'them', 'us', 'them']
+        assert thread[0]['body'].startswith('Hi Dana,')  # our first letter
+        assert thread[1]['body'] == 'What does this cost?'  # their earlier reply
+        assert thread[2]['body'] == smtp.bodies[1].split('\n\n--\n')[0]  # our earlier reply
+        assert thread[3]['body'] == 'Actually, tell me about onboarding.'  # the new message
+
+
+def test_same_message_id_twice_is_answered_once(settings):
+    make_business(settings)
+    person = make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    reply = inbound('Tell me more.', uid=11)
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([reply]),
+                          llm=stub_llm(), now_utc=DAYTIME)
+    assert len(smtp.sent) == 2
+    assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([reply]),
+                                 llm=stub_llm(), now_utc=DAYTIME) == 0
+    assert len(smtp.sent) == 2
+    assert len(messages(settings, person['id'])) == 3  # the resend is not stored again
+
+
+def test_same_text_within_ten_minutes_is_a_duplicate_and_not_answered_again(settings):
+    make_business(settings)
+    person = make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    text = 'Tell me more please.'
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound(text, uid=11)]),
+                          llm=stub_llm(), now_utc=DAYTIME)
+    assert len(smtp.sent) == 2  # greet + one reply
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound(text, uid=12)]),
+                          llm=stub_llm(), now_utc=DAYTIME)
+    assert len(smtp.sent) == 2  # the resend, minutes later, is not answered again
+    stored = messages(settings, person['id'])
+    assert [row['direction'] for row in stored] == ['out', 'in', 'out', 'in']
+    assert stored[-1]['reply_processed'] == 1
+
+
+def test_same_text_after_ten_minutes_is_answered_again(settings):
+    make_business(settings)
+    person = make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    text = 'Tell me more please.'
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound(text, uid=11)]),
+                          llm=stub_llm(), now_utc=DAYTIME)
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE messages SET created_at=? WHERE person_id=? AND direction='in'",
+                   ((datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat(), person['id']))
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound(text, uid=12)]),
+                          llm=stub_llm(), now_utc=DAYTIME)
+    assert len(smtp.sent) == 3  # greet + two separate replies, more than ten minutes apart
+
+
+def test_a_long_thread_is_capped_keeps_greet_and_newest_and_marks_what_was_dropped(settings):
+    make_business(settings)
+    person = make_person(settings)
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)  # the greet, always kept
+    for index in range(30):
+        filler = ('Message number %d. ' % index) * 50  # ~1000 characters each, far over the cap combined
+        insert_message(settings, person['id'], 'in' if index % 2 == 0 else 'out', filler)
+    llm = stub_llm()
+    newest = inbound('The newest question that must stay.', uid=99)
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([newest]), llm=llm, now_utc=DAYTIME)
+    thread = llm.requests[0]['THREAD']
+    assert len(thread) < 32  # something was dropped
+    assert thread[0]['from'] == 'us' and thread[0]['body'].startswith('Hi Dana,')  # the greet is kept
+    assert thread[-1]['body'] == 'The newest question that must stay.'  # the newest is kept
+    assert any(item['from'] == 'system' and 'omitted' in item['body'] for item in thread)
 
 
 def test_an_opt_out_in_the_older_of_two_messages_still_stops_contact(settings):
@@ -669,6 +775,29 @@ def test_a_reply_blocked_by_a_guard_logs_at_most_once_per_owner_local_day(settin
         outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([]), llm=stub_llm(), now_utc=EVENING)
     assert log_events(settings).count(('reply_blocked', 'quiet_hours')) == 1
     assert len(smtp.sent) == 1  # still never answered
+
+
+def test_a_guard_blocking_the_second_of_two_messages_retries_on_a_later_poll(settings):
+    make_business(settings)
+    person = make_person(settings)
+    filler = make_person(settings, email='filler@clinic.example', stage='in_progress')
+    smtp = FakeSmtp()
+    outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
+    # One slot left under the reply cap: the first reply fills it, the second is blocked.
+    add_out_messages(settings, filler['id'], guards.REPLY_CAP - 1, stamp=DAYTIME.isoformat(), move='nurture')
+    first = inbound('First question.', uid=11)
+    second = inbound('Second question.', uid=12)
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([first, second]),
+                          llm=stub_llm(), now_utc=DAYTIME)
+    assert len(smtp.sent) == 2  # the greet, plus exactly one reply -- the cap stopped the second
+    assert ('reply_blocked', 'reply_cap') in log_events(settings)
+    stored = messages(settings, person['id'])
+    assert stored[-1]['body'] == 'Second question.'  # stored, still pending
+
+    next_day = DAYTIME + timedelta(days=1)  # a fresh reply cap
+    outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([]), llm=stub_llm(), now_utc=next_day)
+    assert len(smtp.sent) == 3
+    assert messages(settings, person['id'])[-1]['in_reply_to'] == second['message_id']
 
 
 def test_the_first_poll_only_records_where_the_inbox_is(settings):

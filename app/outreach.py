@@ -36,6 +36,8 @@ TEXT_LIMIT = 4000
 PAIN_MAX = 500
 SUBJECT_MAX = 60
 BODY_MAX = 2000
+THREAD_CHAR_LIMIT = 12000
+DUPLICATE_WINDOW = timedelta(minutes=10)
 
 # Ported verbatim from sales_response_validator.py: the two regexes are the
 # whole reason a generated letter can be trusted.
@@ -232,7 +234,7 @@ def validate(text, move, allowed_facts):
     return not problems, problems
 
 
-def compose_reply(business, person, inbound, analysis, move, *, llm=None):
+def compose_reply(business, person, inbound, analysis, move, thread, *, llm=None):
     """Phrase the decided move, validate it, fall back when it does not pass."""
     if move in VERBATIM_MOVES:
         return SAFE_FALLBACK[move] + '\n\n' + (business['sender_name'] or business['name'] or '').strip()
@@ -244,7 +246,7 @@ def compose_reply(business, person, inbound, analysis, move, *, llm=None):
             json.dumps({'APPROVED_MOVE': move, 'ALLOWED_FACTS': facts,
                         'OBSERVED_PAIN': person['pain'], 'PROSPECT_NAME': usable_person_name(person['name']) or '',
                         'SELLER': business['sender_name'] or business['name'],
-                        'ANALYSIS': analysis, 'CUSTOMER_CONTENT': inbound[:TEXT_LIMIT]},
+                        'ANALYSIS': analysis, 'CUSTOMER_CONTENT': inbound[:TEXT_LIMIT], 'THREAD': thread},
                        ensure_ascii=False),
             schema=REPLY_SCHEMA, purpose='sales_reply')
         if isinstance(answer, dict):
@@ -548,7 +550,7 @@ def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=
     received = 0
     for message in messages:
         try:
-            if handle_reply(settings, business, message, own):
+            if handle_reply(settings, business, message, own, send=send, llm=llm, now_utc=moment):
                 received += 1
         except Exception:
             break  # retried on the next sweep; the cursor is not advanced past it
@@ -559,11 +561,78 @@ def poll_replies(business_id: str, *, settings=None, send=None, fetch=None, llm=
     return received
 
 
-def handle_reply(settings, business, message, own_address):
-    """Store one inbound email once. Opt-out and hostility close the thread
-    right away (no SMTP needed, so no guard can delay them) and run on every
-    inbound message. Everything else is left for answer_pending_replies,
-    which answers each person once per poll against their newest message."""
+def normalized_text(text):
+    """Whitespace- and case-insensitive: for spotting a resend of the same
+    message, not for anything shown to a person or a model."""
+    return ' '.join((text or '').split()).casefold()
+
+
+def is_recent_text_duplicate(db, person_id, text, received_at):
+    """A real duplicate: the same person, the same text (already stripped of
+    quoted history by the caller) sent again within DUPLICATE_WINDOW. Message-
+    ID duplicates are caught earlier, before anything is stored."""
+    window_start = (received_at - DUPLICATE_WINDOW).isoformat()
+    target = normalized_text(text)
+    return any(normalized_text(row['body']) == target for row in db.execute(
+        "SELECT body FROM messages WHERE person_id=? AND direction='in' AND created_at>=?",
+        (person_id, window_start)))
+
+
+def thread_item(row):
+    body = row['body'] or ''
+    if row['direction'] == 'out':
+        body = body.split('\n\n--\n', 1)[0]  # drop the footer/unsubscribe boilerplate
+    return {'from': 'us' if row['direction'] == 'out' else 'them', 'at': row['created_at'],
+            'subject': row['subject'] or '', 'body': body}
+
+
+def build_thread(db, person_id, upto):
+    """The whole conversation with this person, oldest first, both
+    directions, ending with `upto` (the message being answered). Capped at
+    THREAD_CHAR_LIMIT: the first letter and `upto` are always kept, the most
+    recent messages fill the rest, and one marker replaces whatever is
+    dropped in between."""
+    rows = [dict(row) for row in db.execute(
+        "SELECT * FROM messages WHERE person_id=? AND direction IN ('in','out') AND (created_at<? OR id=?) "
+        'ORDER BY created_at,id', (person_id, upto['created_at'], upto['id']))]
+    items = [thread_item(row) for row in rows]
+    if not items:
+        return items
+    anchors = {len(items) - 1}
+    greet_at = next((i for i, row in enumerate(rows) if row['move'] == GREET), None)
+    if greet_at is not None:
+        anchors.add(greet_at)
+    size = lambda item: len(item['subject']) + len(item['body'])
+    budget = THREAD_CHAR_LIMIT - sum(size(items[i]) for i in anchors)
+    kept = set(anchors)
+    for i in range(len(items) - 1, -1, -1):
+        if i in kept:
+            continue
+        cost = size(items[i])
+        if cost > budget:
+            break
+        kept.add(i)
+        budget -= cost
+    if len(kept) == len(items):
+        return items
+    dropped, marked, result = len(items) - len(kept), False, []
+    for i, item in enumerate(items):
+        if i in kept:
+            result.append(item)
+        elif not marked:
+            result.append({'from': 'system', 'at': items[i]['at'], 'subject': '',
+                          'body': f'[{dropped} earlier messages omitted]'})
+            marked = True
+    return result
+
+
+def handle_reply(settings, business, message, own_address, *, send, llm=None, now_utc=None):
+    """Store one inbound email once and answer it right away, so a second
+    message in the same poll is answered with the first reply already in
+    the thread. Opt-out and hostility run on every inbound message and close
+    the thread before any reply is attempted. A real duplicate (same
+    Message-ID, or the same text within DUPLICATE_WINDOW) is stored, marked
+    reply_processed=1, and never gets its own reply."""
     business_id = business['id']
     sender = message['from']
     if not sender or sender == own_address or message['automatic']:
@@ -571,6 +640,7 @@ def handle_reply(settings, business, message, own_address):
     text = reply_text(message['text'])
     if not text:
         return False
+    received_at = datetime.now(timezone.utc)
     with connect(settings.db_path) as db:
         person = match_person(db, business_id, message)
         if not person:
@@ -578,29 +648,37 @@ def handle_reply(settings, business, message, own_address):
         if db.execute('SELECT 1 FROM messages WHERE person_id=? AND smtp_message_id=?',
                       (person['id'], message['message_id'])).fetchone():
             return False
-        db.execute('INSERT INTO messages(id,person_id,direction,subject,body,smtp_message_id,created_at)'
-                   " VALUES (?,?,'in',?,?,?,?)",
-                   (str(uuid4()), person['id'], message['subject'], text, message['message_id'], now()))
+        duplicate = is_recent_text_duplicate(db, person['id'], text, received_at)
+        message_row_id = str(uuid4())
+        db.execute('INSERT INTO messages(id,person_id,direction,subject,body,smtp_message_id,created_at,reply_processed)'
+                   " VALUES (?,?,'in',?,?,?,?,?)",
+                   (message_row_id, person['id'], message['subject'], text, message['message_id'], now(), int(duplicate)))
         db.execute('UPDATE people SET updated_at=? WHERE id=?', (now(), person['id']))
+        stored = dict(db.execute('SELECT * FROM messages WHERE id=?', (message_row_id,)).fetchone())
     if is_opt_out(text) or HOSTILE.search(text[:500]):
         return stop_contact(settings, business_id, person, 'reply_opt_out')
+    if duplicate or person['stage'] in {'done', 'lost'}:
+        return True  # a resend, or a thread already closed: nothing to answer
+    attempt_reply(settings, business, person, stored, send=send, llm=llm, now_utc=now_utc)
     return True
 
 
-def attempt_reply(settings, business, person, *, in_reply_to, references, subject, text, send, llm=None, now_utc=None):
-    """Decide and try to send one reply to one already-stored inbound message.
-    Returns True when it went out, False when a guard blocked it (left
-    exactly as it was for the next poll's answer_pending_replies to retry)."""
-    business_id = business['id']
+def attempt_reply(settings, business, person, message_row, *, send, llm=None, now_utc=None):
+    """Decide and try to send one reply to one already-stored inbound
+    message, with the whole thread so far as context. Returns True when it
+    went out, False when a guard blocked it (left exactly as it was for the
+    next poll's answer_pending_replies to retry)."""
+    business_id, text = business['id'], message_row['body']
     with connect(settings.db_path) as db:
         sent_moves = {row[0] for row in db.execute(
             "SELECT move FROM messages WHERE person_id=? AND direction='out' AND move IS NOT NULL", (person['id'],))}
+        thread = build_thread(db, person['id'], message_row)
     analysis = dict(ANALYSIS_FIELDS)
     try:
         analysis = analysis_from((llm or ask)(
             prompt('sales_analysis.md'),
             json.dumps({'CUSTOMER_CONTENT': text, 'OBSERVED_PAIN': person['pain'],
-                        'THREAD_SUBJECT': subject}, ensure_ascii=False),
+                        'THREAD_SUBJECT': message_row['subject'] or '', 'THREAD': thread}, ensure_ascii=False),
             schema=ANALYSIS_SCHEMA, purpose='sales_analysis'))
     except Exception:
         pass  # an unreadable analysis keeps discovery going; it never invents readiness
@@ -619,12 +697,13 @@ def attempt_reply(settings, business, person, *, in_reply_to, references, subjec
                 db.execute('INSERT INTO log(business_id,person_id,event,detail,created_at) VALUES (?,?,?,?,?)',
                            (business_id, person['id'], 'reply_blocked', reason, now()))
         return False
-    reply_subject = (subject or '').strip() or 'Your reply'
+    reply_subject = (message_row['subject'] or '').strip() or 'Your reply'
     if not reply_subject.casefold().startswith('re:'):
         reply_subject = 'Re: ' + reply_subject
     deliver(settings, business, person, reply_subject[:255],
-            compose_reply(business, person, text, analysis, move, llm=llm), move, send=send,
-            headers={'In-Reply-To': in_reply_to, 'References': references[-900:]}, now_utc=moment)
+            compose_reply(business, person, text, analysis, move, thread, llm=llm), move, send=send,
+            headers={'In-Reply-To': message_row['smtp_message_id'], 'References': message_row['smtp_message_id']},
+            now_utc=moment)
     return True
 
 
@@ -645,34 +724,24 @@ def pending_replies(db, business_id):
 
 
 def answer_pending_replies(settings, business, *, send, llm=None, now_utc=None):
-    """Answer each person at most once per poll, against their newest pending
-    message, so two unanswered messages from the same person produce one
-    reply, not two. Any earlier pending message from that person is marked
-    reply_processed=1 in the same step, so it is never answered later. Runs
-    on every poll (see poll_replies), so a reply blocked once by quiet hours
-    or the reply cap goes out as soon as its own window allows -- it is never
-    simply dropped because the IMAP cursor already moved past it."""
+    """Retry every inbound message that never got an answer, each on its own,
+    in arrival order. Runs on every poll (see poll_replies), so a reply
+    blocked once by quiet hours or the reply cap goes out as soon as its own
+    window allows -- it is never simply dropped because the IMAP cursor
+    already moved past it."""
     business_id = business['id']
     with connect(settings.db_path) as db:
         pending = pending_replies(db, business_id)
-    by_person = {}
-    for row in pending:
-        by_person.setdefault(row['person_id'], []).append(row)
     answered = 0
-    for person_id, rows in by_person.items():
-        *older, newest = rows
+    for row in pending:
         with connect(settings.db_path) as db:
-            if older:
-                db.executemany('UPDATE messages SET reply_processed=1 WHERE id=?', [(row['id'],) for row in older])
-            person = db.execute('SELECT * FROM people WHERE id=?', (person_id,)).fetchone()
+            person = db.execute('SELECT * FROM people WHERE id=?', (row['person_id'],)).fetchone()
         if not person:
             continue
         person = dict(person)
         if person['stage'] in {'done', 'lost'}:
             continue  # changed since the query ran, e.g. stopped earlier this same poll
-        if attempt_reply(settings, business, person, in_reply_to=newest['smtp_message_id'],
-                         references=newest['smtp_message_id'], subject=newest['subject'] or '',
-                         text=newest['body'], send=send, llm=llm, now_utc=now_utc):
+        if attempt_reply(settings, business, person, row, send=send, llm=llm, now_utc=now_utc):
             answered += 1
     return answered
 
