@@ -14,7 +14,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import auth, billing, board, contacts, outreach, search
+from . import auth, billing, board, chat, contacts, outreach, search
 from .scheduler import Scheduler
 from .db import ROOT, connect, migrate, now
 from .settings import load
@@ -438,6 +438,39 @@ def create_app(settings=None, *, scheduler_enabled=True):
             raise HTTPException(413, "Event is too large")
         await run_in_threadpool(billing.webhook, request.app.state.settings, payload, request.headers.get("x-signature"))
         return {"ok": True}
+
+    @app.get("/c/{token}")
+    def chat_page(request: Request, token: str):
+        s = request.app.state.settings
+        business, person = chat.person_for(s, token)
+        status, view = chat.page(s, token, business, person)
+        return templates.TemplateResponse(request=request, name="chat.html", context=view, status_code=status)
+
+    @app.post("/c/{token}/messages")
+    async def chat_send(request: Request, token: str):
+        # Same origin rule as form(), without the session csrf cookie. The signed
+        # field in the page is the token this prospect already holds.
+        origin = request.headers.get("origin")
+        if origin == "null" or (origin and origin.rstrip("/") not in allowed_origins(request.app.state.settings)):
+            raise HTTPException(403, "Invalid origin")
+        content_type = request.headers.get("content-type", "")
+        if content_type.split(";")[0] != "application/x-www-form-urlencoded":
+            raise HTTPException(415, "Use a form")
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 16384:
+                raise HTTPException(413, "Form is too large")
+        fields = {key: values[0] for key, values in parse_qs(body.decode(), keep_blank_values=True).items()}
+        s = request.app.state.settings
+
+        def handle():
+            business, person = chat.person_for(s, token)
+            return chat.accept(s, token, business, person, fields)
+
+        status, view = await run_in_threadpool(handle)
+        name = "chat_messages.html" if request.headers.get("hx-request") == "true" else "chat.html"
+        return templates.TemplateResponse(request=request, name=name, context=view, status_code=status)
 
     return app
 

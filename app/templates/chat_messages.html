@@ -1,0 +1,20 @@
+<div id="thread" class="chat-thread" aria-live="polite">
+{% for message in messages %}
+<article class="chat-bubble {{ message.direction }}">
+{% if message.channel == 'email' %}<p class="chat-channel">Email</p>{% endif %}
+<p class="chat-body">{{ message.body }}</p>
+</article>
+{% else %}
+<p class="chat-empty">No messages yet.</p>
+{% endfor %}
+{% if notice %}<p class="chat-notice">{{ notice }}</p>{% endif %}
+</div>
+{% if compose %}
+<form class="chat-form" method="post" action="{{ action }}" hx-post="{{ action }}" hx-target="#chat-panel" hx-swap="innerHTML">
+<input type="hidden" name="sig" value="{{ sig }}">
+<label class="chat-label" for="chat-text">Message</label>
+<textarea id="chat-text" name="text" maxlength="2000" required></textarea>
+<p id="typing" class="chat-typing" hidden>Evorove is typing…</p>
+<button type="submit">Send</button>
+</form>
+{% endif %}

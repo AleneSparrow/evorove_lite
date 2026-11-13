@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"allowEval":false,"includeIndicatorStyles":false,"historyCacheSize":0}'>
+<title>{{ sender_name }}</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/chat.js" defer></script>
+</head>
+<body class="chat-page">
+<header class="chat-top"><h1>{{ sender_name }}</h1></header>
+<main>
+<div id="chat-panel">
+{% include "chat_messages.html" %}
+</div>
+</main>
+<footer class="chat-foot"><p>Powered by Evorove</p></footer>
+</body>
+</html>
