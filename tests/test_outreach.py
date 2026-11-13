@@ -40,7 +40,7 @@ def stub_llm(analysis=None, body=None, error=None):
         if error:
             raise error
         if purpose == 'sales_analysis':
-            return dict({'problem': '', 'desired_outcome': '', 'objection': '', 'objection_cause': '',
+            return dict({'problem': '', 'desired_outcome': '', 'objection': '', 'objection_cause': '', 'question': '',
                          'ready': False, 'hostile': False, 'requires_human': False}, **(analysis or {}))
         return {'body': body if body is not None else 'Thanks — what is slowest for you today?'}
 
@@ -257,21 +257,44 @@ def test_policy_precedence(settings):
                            {'offer_text': '', 'payment_link': ''}) == outreach.PRESENT_VALUE
 
 
-def test_decide_never_sends_the_offer_twice(settings):
+def test_decide_resends_the_link_at_most_twice_then_nurtures(settings):
     make_business(settings)
     business = {'offer_text': 'Two boards.', 'payment_link': 'https://pay.example.com/acme'}
     ready = dict(outreach.ANALYSIS_FIELDS, problem='calls go unanswered',
                  desired_outcome='same-day callbacks', ready=True)
-    already_offered = {outreach.CONFIRM_NEED, outreach.PRESENT_VALUE, outreach.OFFER}
-    # Still ready, still no objection, offer already sent: never OFFER again.
-    assert outreach.decide(ready, already_offered, business) != outreach.OFFER
-    assert outreach.decide(ready, already_offered, business) == outreach.NURTURE
+    after_offer = [outreach.CONFIRM_NEED, outreach.PRESENT_VALUE, outreach.OFFER]
+    # Still ready, offer already sent: resend the link, do not re-discover.
+    assert outreach.decide(ready, after_offer, business) == outreach.OFFER_AGAIN
+    after_one_resend = after_offer + [outreach.OFFER_AGAIN]
+    assert outreach.decide(ready, after_one_resend, business) == outreach.OFFER_AGAIN
+    after_two_resends = after_one_resend + [outreach.OFFER_AGAIN]
+    assert outreach.decide(ready, after_two_resends, business) == outreach.NURTURE
     # A new objection after the offer is still answered, not ignored.
     objecting = dict(ready, objection='too expensive', objection_cause='affordability')
-    assert outreach.decide(objecting, already_offered, business) == outreach.ANSWER_OBJECTION
-    # A new, unanswered question after the offer still gets a discovery question.
-    fresh_question = dict(outreach.ANALYSIS_FIELDS, ready=True)
-    assert outreach.decide(fresh_question, already_offered, business) == outreach.ASK_DISCOVERY
+    assert outreach.decide(objecting, after_offer, business) == outreach.ANSWER_OBJECTION
+    # Small talk after the offer -- no question, no renewed readiness, no
+    # objection: nothing left to do but leave the door open.
+    quiet = dict(outreach.ANALYSIS_FIELDS, ready=False)
+    assert outreach.decide(quiet, after_offer, business) == outreach.NURTURE
+
+
+def test_decide_answers_a_direct_question_instead_of_discovery(settings):
+    make_business(settings)
+    business = {'offer_text': 'Two boards.', 'payment_link': 'https://pay.example.com/acme'}
+    asking = dict(outreach.ANALYSIS_FIELDS, question='Do you integrate with HubSpot?')
+    assert outreach.decide(asking, [], business) == outreach.ANSWER_QUESTION
+    # A question does not jump ahead of an unanswered objection or a ready buyer.
+    assert outreach.decide(dict(asking, objection='too expensive', objection_cause='affordability'),
+                           [], business) == outreach.ANSWER_OBJECTION
+    assert outreach.decide(dict(asking, ready=True), [], business) == outreach.OFFER
+
+
+def test_decide_gives_up_discovery_after_two_tries(settings):
+    make_business(settings)
+    business = {'offer_text': 'Two boards.', 'payment_link': 'https://pay.example.com/acme'}
+    blank = dict(outreach.ANALYSIS_FIELDS)
+    assert outreach.decide(blank, [outreach.ASK_DISCOVERY], business) == outreach.ASK_DISCOVERY
+    assert outreach.decide(blank, [outreach.ASK_DISCOVERY, outreach.ASK_DISCOVERY], business) == outreach.NURTURE
 
 
 def test_validator_rejects_what_the_model_may_not_say():
@@ -456,7 +479,7 @@ def test_the_offer_hands_over_the_owners_words_and_link(settings):
     assert people(settings)[0]['stage'] == 'offer_made'
 
 
-def test_a_second_ready_reply_never_repeats_the_offer_link(settings):
+def test_a_second_ready_reply_resends_the_link_instead_of_repeating_discovery(settings):
     make_business(settings)
     person = make_person(settings)
     smtp = FakeSmtp()
@@ -471,12 +494,14 @@ def test_a_second_ready_reply_never_repeats_the_offer_link(settings):
         [inbound('Send me the details.', uid=11)], uidvalidity=1), llm=llm, now_utc=DAYTIME)
     assert messages(settings, person['id'])[-1]['move'] == outreach.OFFER
 
-    # They say "ready" again -- no second link, and the move is never OFFER again.
+    # They say "ready" again -- never a second OFFER move, but the link is
+    # resent (move OFFER_AGAIN), not another round of discovery.
     outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap(
         [inbound('Sounds great, I am ready to go.', uid=12)], uidvalidity=1), llm=llm, now_utc=DAYTIME)
     stored = messages(settings, person['id'])
     assert [row['move'] for row in stored if row['direction'] == 'out'].count(outreach.OFFER) == 1
-    assert 'pay.example.com' not in smtp.bodies[-1]
+    assert stored[-1]['move'] == outreach.OFFER_AGAIN
+    assert 'pay.example.com' in smtp.bodies[-1]
     assert people(settings)[0]['stage'] == 'offer_made'
 
 
@@ -513,7 +538,7 @@ def test_a_model_that_invents_a_claim_is_replaced_by_the_safe_wording(settings):
                           llm=stub_llm(body='We guarantee 40% fewer missed calls, free for a month.'), now_utc=DAYTIME)
     letter = smtp.bodies[-1]
     assert 'guarantee' not in letter and '40%' not in letter
-    assert outreach.SAFE_FALLBACK[outreach.ASK_DISCOVERY] in letter
+    assert outreach.SAFE_FALLBACK[outreach.ASK_DISCOVERY][0] in letter
 
 
 def test_an_unavailable_model_still_answers_safely(settings):
@@ -523,7 +548,7 @@ def test_an_unavailable_model_still_answers_safely(settings):
     outreach.send_first_letters('biz-1', settings=settings, send=smtp, now_utc=DAYTIME)
     assert outreach.poll_replies('biz-1', settings=settings, send=smtp, fetch=fake_imap([inbound('Tell me more.')]),
                                  llm=stub_llm(error=RuntimeError('LLM is not installed')), now_utc=DAYTIME) == 1
-    assert outreach.SAFE_FALLBACK[outreach.ASK_DISCOVERY] in smtp.bodies[-1]
+    assert outreach.SAFE_FALLBACK[outreach.ASK_DISCOVERY][0] in smtp.bodies[-1]
 
 
 def test_a_question_for_a_human_gets_the_servers_own_wording(settings):

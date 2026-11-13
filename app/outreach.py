@@ -24,7 +24,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
 from uuid import uuid4
 
-from . import billing, guards
+from . import billing, guards, notify
 from .db import ROOT, connect, now
 from .llm import ask
 from .settings import decrypt_password, load
@@ -86,28 +86,52 @@ HOSTILE = re.compile(r'\b(spam|scam|report (you|this)|fcc|ftc|attorney|lawyer|su
 
 GREET, ASK_DISCOVERY, CONFIRM_NEED, PRESENT_VALUE = 'greet', 'ask_discovery', 'confirm_need', 'present_value'
 DIAGNOSE_OBJECTION, ANSWER_OBJECTION = 'diagnose_objection', 'answer_objection'
-OFFER, NURTURE, END_CONTACT, HANDOFF = 'offer', 'nurture', 'end_contact', 'handoff'
+OFFER, OFFER_AGAIN, NURTURE, END_CONTACT, HANDOFF = 'offer', 'offer_again', 'nurture', 'end_contact', 'handoff'
+ANSWER_QUESTION = 'answer_question'
 
 # A handoff's and a closing's exact wording are server-controlled, as in the old
 # validator: these two moves are never phrased by the model.
 VERBATIM_MOVES = frozenset({HANDOFF, END_CONTACT})
 
+# Caps so a policy that never got what it needed stops asking instead of
+# looping on the person forever.
+MAX_ASK_DISCOVERY = 2
+MAX_ANSWER_OBJECTION = 2
+MAX_OFFER_AGAIN = 2
+
 # One honest sentence per move. Used when the model is unavailable or writes
-# something the validator rejects -- never an improvised answer.
+# something the validator rejects -- never an improvised answer. A move that
+# can legitimately be sent more than once in a thread (discovery, diagnosing
+# or answering an objection, resending the link) gets more than one variant,
+# so a second fallback in a row is never a verbatim repeat of the first.
 SAFE_FALLBACK = {
-    ASK_DISCOVERY: 'Thanks for writing back. What is the part of this that costs you the most time right now?',
+    ASK_DISCOVERY: (
+        'Thanks for writing back. What is the part of this that costs you the most time right now?',
+        "One more angle on that -- what have you already tried, and what didn't quite work?",
+    ),
     CONFIRM_NEED: 'Thanks — so I have it right: that is the problem you want solved first?',
     PRESENT_VALUE: 'Thanks for the detail. I think this is close to what we do; may I send you the specifics?',
-    DIAGNOSE_OBJECTION: 'That is fair. So I answer the right thing: is it the cost, the timing, or the fit?',
-    ANSWER_OBJECTION: 'That is a fair point, and I would rather answer it properly than quickly. May I come back to you on it?',
+    DIAGNOSE_OBJECTION: (
+        'That is fair. So I answer the right thing: is it the cost, the timing, or the fit?',
+        'Understood. Just so I answer the real concern -- what would need to be true for this to make sense?',
+    ),
+    ANSWER_OBJECTION: (
+        'That is a fair point, and I would rather answer it properly than quickly. May I come back to you on it?',
+        'I hear you, and I do not want to just repeat myself -- what would actually change your mind here?',
+    ),
     OFFER: 'Here is what I can put in front of you.',
+    OFFER_AGAIN: (
+        'Here it is again, in case it did not come through.',
+        'Sending this once more for you.',
+    ),
+    ANSWER_QUESTION: 'I would rather not guess at that than get it wrong — what matters most for your decision here?',
     NURTURE: 'Understood, and no pressure from me. If this moves up your list later, write back and I will pick it up.',
     END_CONTACT: 'Understood — I will leave it there. Thank you for the reply.',
     HANDOFF: 'Thanks for writing. This deserves a proper answer from a person rather than a quick one from me, '
              'so I am passing it on and someone will come back to you.',
 }
 
-ANALYSIS_FIELDS = {'problem': '', 'desired_outcome': '', 'objection': '', 'objection_cause': '',
+ANALYSIS_FIELDS = {'problem': '', 'desired_outcome': '', 'objection': '', 'objection_cause': '', 'question': '',
                    'ready': False, 'hostile': False, 'requires_human': False}
 ANALYSIS_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': sorted(ANALYSIS_FIELDS), 'properties': {
     name: {'type': 'boolean' if isinstance(default, bool) else 'string'}
@@ -197,21 +221,41 @@ def analysis_from(payload):
 
 
 def decide(analysis, sent_moves, business):
-    """One governed move. Precedence is the old SalesPolicyEngine's, trimmed to
-    email: no booking, no callback, no owner-fact round trip."""
+    """One governed move. Precedence: requires_human, an objection, a ready
+    buyer's offer (or resend), a direct question, then discovery/confirm/
+    value/nurture. `sent_moves` is every move already sent to this person --
+    a set or a list both work, since only membership and counts are used.
+
+    `problem` and `desired_outcome` describe what is known from the whole
+    THREAD, not only the newest message (sales_analysis.md asks the model to
+    keep stating them once learned); CONFIRM_NEED already having been sent
+    is an equally reliable, cheaper signal that they were known at some
+    point, so a later message that does not repeat them does not re-open
+    discovery."""
+    sent_moves = list(sent_moves)
     if analysis['requires_human']:
         return HANDOFF
     if analysis['objection']:
-        return ANSWER_OBJECTION if analysis['objection_cause'] else DIAGNOSE_OBJECTION
-    if not analysis['problem'] or not analysis['desired_outcome']:
+        if not analysis['objection_cause']:
+            return DIAGNOSE_OBJECTION
+        if sent_moves.count(ANSWER_OBJECTION) >= MAX_ANSWER_OBJECTION:
+            return NURTURE  # the same objection, answered twice already
+        return ANSWER_OBJECTION
+    offer_available = bool(business['offer_text'] and business['payment_link'])
+    if offer_available and analysis['ready']:
+        if OFFER not in sent_moves:
+            return OFFER  # ready gets the offer, whether or not discovery or confirm_need happened
+        if sent_moves.count(OFFER_AGAIN) < MAX_OFFER_AGAIN:
+            return OFFER_AGAIN  # still ready, asking again: resend, do not re-discover
+    if analysis['question']:
+        return ANSWER_QUESTION
+    state_known = bool(analysis['problem'] and analysis['desired_outcome']) or CONFIRM_NEED in sent_moves
+    if not state_known:
+        if sent_moves.count(ASK_DISCOVERY) >= MAX_ASK_DISCOVERY:
+            return NURTURE  # asked twice, still nothing to confirm
         return ASK_DISCOVERY
     if CONFIRM_NEED not in sent_moves:
         return CONFIRM_NEED
-    # One offer per person, ever. A second "I'm ready" does not get a second
-    # link -- whatever they actually asked is answered above (objection,
-    # missing discovery); anything left over is a plain, link-free check-in.
-    if OFFER not in sent_moves and analysis['ready'] and business['offer_text'] and business['payment_link']:
-        return OFFER
     if PRESENT_VALUE not in sent_moves:
         return PRESENT_VALUE
     return NURTURE
@@ -234,11 +278,24 @@ def validate(text, move, allowed_facts):
     return not problems, problems
 
 
-def compose_reply(business, person, inbound, analysis, move, thread, *, llm=None):
+def fallback_for(move, sent_moves):
+    """SAFE_FALLBACK's text for this move. A move with more than one variant
+    picks a later one once it has already been sent before, so a capped
+    move -- asked, answered, or offered again more than once -- never
+    repeats itself verbatim in the same thread."""
+    variants = SAFE_FALLBACK[move]
+    if isinstance(variants, str):
+        return variants
+    index = min(list(sent_moves).count(move), len(variants) - 1)
+    return variants[index]
+
+
+def compose_reply(business, person, inbound, analysis, move, thread, sent_moves, *, llm=None):
     """Phrase the decided move, validate it, fall back when it does not pass."""
     if move in VERBATIM_MOVES:
-        return SAFE_FALLBACK[move] + '\n\n' + (business['sender_name'] or business['name'] or '').strip()
-    facts = business['offer_text'] or '' if move in {PRESENT_VALUE, ANSWER_OBJECTION, OFFER} else ''
+        return fallback_for(move, sent_moves) + '\n\n' + (business['sender_name'] or business['name'] or '').strip()
+    facts = business['offer_text'] or '' if move in {PRESENT_VALUE, ANSWER_OBJECTION, OFFER, OFFER_AGAIN,
+                                                      ANSWER_QUESTION} else ''
     text = ''
     try:
         answer = (llm or ask)(
@@ -254,10 +311,48 @@ def compose_reply(business, person, inbound, analysis, move, thread, *, llm=None
     except Exception:
         text = ''
     ok, _ = validate(text, move, facts)
-    body = text.strip() if ok else SAFE_FALLBACK[move]
-    if move == OFFER:
+    body = text.strip() if ok else fallback_for(move, sent_moves)
+    if move in {OFFER, OFFER_AGAIN}:
         body = body + '\n\n' + business['offer_text'].strip() + '\n\n' + billing.payment_link_for(business, person['id'])
     return body + '\n\n' + (business['sender_name'] or business['name'] or '').strip()
+
+
+def next_reply(business, person, message_row, *, llm=None):
+    """The whole sales-policy decision for one inbound message: analyse it in
+    context, decide the move, phrase it. Pure -- no DB, no SMTP, no footer,
+    no guards -- so any channel can ask "what would we say" without sending
+    anything. Returns (move, body).
+
+    `person` must already carry 'sent_moves' (every move already sent to
+    them, for decide()) and `message_row` must carry 'thread' (the
+    conversation so far, oldest first, as build_thread returns) -- both
+    prepared by the caller, since this function does no I/O of its own.
+    `message_row` may also carry a 'channel' column from a migration not
+    merged into this branch yet; it is read with .get and defaults to
+    'email', so this keeps working whether or not that column exists.
+
+    A hostile message is reported back as END_CONTACT with its fixed,
+    courteous closing text -- decide() itself never returns that move, so a
+    caller can tell the two apart and still do its own stopping (suppression,
+    stage change) on this one signal.
+    """
+    text = message_row['body']
+    thread = message_row.get('thread') or []
+    sent_moves = list(person.get('sent_moves') or [])
+    channel = message_row.get('channel') or 'email'
+    analysis = dict(ANALYSIS_FIELDS)
+    try:
+        analysis = analysis_from((llm or ask)(
+            prompt('sales_analysis.md'),
+            json.dumps({'CUSTOMER_CONTENT': text, 'OBSERVED_PAIN': person['pain'],
+                        'THREAD_SUBJECT': message_row.get('subject') or '', 'THREAD': thread,
+                        'CHANNEL': channel}, ensure_ascii=False),
+            schema=ANALYSIS_SCHEMA, purpose='sales_analysis'))
+    except Exception:
+        pass  # an unreadable analysis keeps discovery going; it never invents readiness
+    move = END_CONTACT if analysis['hostile'] else decide(analysis, sent_moves, business)
+    body = compose_reply(business, person, text, analysis, move, thread, sent_moves, llm=llm)
+    return move, body
 
 
 # --- mail transports (injected in tests; no network there) ------------------
@@ -655,6 +750,11 @@ def handle_reply(settings, business, message, own_address, *, send, llm=None, no
                    (message_row_id, person['id'], message['subject'], text, message['message_id'], now(), int(duplicate)))
         db.execute('UPDATE people SET updated_at=? WHERE id=?', (now(), person['id']))
         stored = dict(db.execute('SELECT * FROM messages WHERE id=?', (message_row_id,)).fetchone())
+    # Not a DB column (no schema change): kept only in memory, for this one
+    # synchronous reply, so a reply answered right away can carry the real
+    # References chain. A reply retried later by answer_pending_replies has
+    # no live email to read it from and falls back to the single Message-ID.
+    stored['references'] = ' '.join(part for part in (message['references'], message['message_id']) if part)
     if is_opt_out(text) or HOSTILE.search(text[:500]):
         return stop_contact(settings, business_id, person, 'reply_opt_out')
     if duplicate or person['stage'] in {'done', 'lost'}:
@@ -666,26 +766,23 @@ def handle_reply(settings, business, message, own_address, *, send, llm=None, no
 def attempt_reply(settings, business, person, message_row, *, send, llm=None, now_utc=None):
     """Decide and try to send one reply to one already-stored inbound
     message, with the whole thread so far as context. Returns True when it
-    went out, False when a guard blocked it (left exactly as it was for the
-    next poll's answer_pending_replies to retry)."""
+    went out (or when there was nothing to send -- a hostile message closes
+    the thread instead), False when a guard blocked it (left exactly as it
+    was for the next poll's answer_pending_replies to retry). The actual
+    policy decision and phrasing is next_reply's, a pure function; this is
+    everything channel-specific around it: DB-sourced context, guards,
+    headers, delivery."""
     business_id, text = business['id'], message_row['body']
     with connect(settings.db_path) as db:
-        sent_moves = {row[0] for row in db.execute(
-            "SELECT move FROM messages WHERE person_id=? AND direction='out' AND move IS NOT NULL", (person['id'],))}
+        sent_moves = [row[0] for row in db.execute(
+            "SELECT move FROM messages WHERE person_id=? AND direction='out' AND move IS NOT NULL "
+            'ORDER BY created_at,id', (person['id'],))]
         thread = build_thread(db, person['id'], message_row)
-    analysis = dict(ANALYSIS_FIELDS)
-    try:
-        analysis = analysis_from((llm or ask)(
-            prompt('sales_analysis.md'),
-            json.dumps({'CUSTOMER_CONTENT': text, 'OBSERVED_PAIN': person['pain'],
-                        'THREAD_SUBJECT': message_row['subject'] or '', 'THREAD': thread}, ensure_ascii=False),
-            schema=ANALYSIS_SCHEMA, purpose='sales_analysis'))
-    except Exception:
-        pass  # an unreadable analysis keeps discovery going; it never invents readiness
-    if analysis['hostile']:
-        stop_contact(settings, business_id, person, 'hostile_reply')
-        return True  # the thread is closed; there is nothing left to retry
-    move = decide(analysis, sent_moves, business)
+    move, body = next_reply(business, dict(person, sent_moves=sent_moves), dict(message_row, thread=thread), llm=llm)
+    if move == END_CONTACT:  # next_reply's own signal for a hostile message
+        return stop_contact(settings, business_id, person, 'hostile_reply')
+    if move == HANDOFF:
+        notify.handoff_alert(settings, business_id, business['name'])
     moment = now_utc or datetime.now(timezone.utc)
     allowed, reason = guards.can_send(business_id, person['email'], moment, settings=settings, kind='reply')
     if not allowed:
@@ -700,9 +797,13 @@ def attempt_reply(settings, business, person, message_row, *, send, llm=None, no
     reply_subject = (message_row['subject'] or '').strip() or 'Your reply'
     if not reply_subject.casefold().startswith('re:'):
         reply_subject = 'Re: ' + reply_subject
-    deliver(settings, business, person, reply_subject[:255],
-            compose_reply(business, person, text, analysis, move, thread, llm=llm), move, send=send,
-            headers={'In-Reply-To': message_row['smtp_message_id'], 'References': message_row['smtp_message_id']},
+    # The full chain when this message is being answered right away (handle_reply
+    # stashed it in memory); a message retried later has no live email left to
+    # read it from, so it falls back to its own single Message-ID -- same as
+    # In-Reply-To, same as before task 09.
+    references = (message_row.get('references') or message_row['smtp_message_id'] or '')[-900:]
+    deliver(settings, business, person, reply_subject[:255], body, move, send=send,
+            headers={'In-Reply-To': message_row['smtp_message_id'], 'References': references},
             now_utc=moment)
     return True
 

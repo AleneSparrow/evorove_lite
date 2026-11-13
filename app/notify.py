@@ -27,6 +27,20 @@ def failure_alert(settings, business_id, kind, error_type):
     return telegram(settings, f'Evorove job failed: {kind}\nBusiness: {business_id or "system"}\nError: {error_type}')
 
 
+def handoff_alert(settings, business_id, business_name):
+    """A conversation was handed to a person: tell the owner, naming only the
+    business, never the prospect's email or what they wrote. Without
+    Telegram configured, the handoff is still recorded as a 'handoff' log row
+    so the board can show it."""
+    configured = bool(settings.get('TELEGRAM_BOT_TOKEN') and settings.get('TELEGRAM_CHAT_ID'))
+    sent = telegram(settings, f'Evorove: a conversation needs a person.\nBusiness: {business_name or business_id}')
+    if not configured:
+        with connect(settings.db_path) as db:
+            db.execute("INSERT INTO log(business_id,event,detail,created_at) VALUES (?,'handoff','Telegram not configured',?)",
+                       (business_id, now()))
+    return sent
+
+
 def daily_summary(settings, current=None):
     current = current or datetime.now(timezone.utc)
     since = (current - timedelta(hours=24)).isoformat()
