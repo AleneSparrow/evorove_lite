@@ -170,3 +170,36 @@ def test_orphan_call_records_its_own_run(db, monkeypatch):
         row = dict(database.execute("SELECT * FROM runs").fetchone())
     assert row["kind"] == "offer_reading" and row["status"] == "ok"
     assert row["tokens_in"] == 10 and row["tokens_out"] == 4
+
+
+def _array_nodes(schema):
+    """Every array-type node anywhere in a JSON schema tree: its own items,
+    recursively, and every property of every object along the way."""
+    if not isinstance(schema, dict):
+        return
+    if schema.get("type") == "array":
+        yield schema
+        yield from _array_nodes(schema.get("items"))
+    for value in (schema.get("properties") or {}).values():
+        yield from _array_nodes(value)
+
+
+def test_no_schema_sent_to_the_model_sets_minitems_above_one():
+    """Anthropic's structured outputs only accepts minItems 0 or 1 on an array
+    -- anything higher is a 400 on every call (the search-preview outage this
+    guards against). A count like "2 to 3 segments" belongs to Python, after
+    the response, never in the schema handed to output_config."""
+    import app.outreach as outreach
+    import app.search as search
+    checked = 0
+    for module in (search, outreach):
+        for name in dir(module):
+            if not name.endswith("_SCHEMA"):
+                continue
+            schema = getattr(module, name)
+            if not isinstance(schema, dict):
+                continue
+            for node in _array_nodes(schema):
+                checked += 1
+                assert node.get("minItems", 0) <= 1, f"{module.__name__}.{name} sets minItems > 1"
+    assert checked > 0  # the scan actually found at least one array schema to check

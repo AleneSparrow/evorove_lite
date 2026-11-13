@@ -1,6 +1,6 @@
 import asyncio
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -146,7 +146,10 @@ def test_find_people_runs_in_background_and_surfaces_failure(client, settings, m
     assert form(client, '/app', '/app/find-people').status_code == 303
     client.portal.call(finish)
     status = client.get('/app/search-status')
-    assert 'failed' in status.text and 'RuntimeError' in status.text
+    assert 'Last search failed' in status.text
+    # The exception's class name (e.g. BadRequestError) is never shown in the
+    # UI, only ever in the log.
+    assert 'RuntimeError' not in status.text
     assert 'SECRET-MUST-NOT-LEAK' not in status.text
 
 
@@ -194,8 +197,33 @@ def test_search_preview_failure_hides_exception_message(client, settings, monkey
         await asyncio.gather(*list(client.app.state.search_preview_tasks))
     client.portal.call(finish)
     page = client.get('/app/search-preview')
-    assert 'Preview failed (RuntimeError)' in page.text
+    assert "Couldn't build the preview. Try again in a minute." in page.text
+    # Neither the exception's class name nor its message ever reaches the UI.
+    assert 'RuntimeError' not in page.text
     assert 'SECRET-MUST-NOT-LEAK' not in page.text
+
+
+def test_board_hero_action_hints_at_settings_when_there_is_no_brief(client, settings):
+    signup(client)
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE businesses SET plan='pro',subscription_status='active',brief=''")
+    page = client.get('/app').text
+    assert '>Find people</button>' not in page
+    assert 'Describe who you sell to' in page and 'href="/app/settings"' in page
+    assert 'Metrics</a>' not in page.split('class="toolbar"')[1].split('</div>')[0]
+
+
+def test_board_hero_action_shows_the_last_search_in_relative_time(client, settings):
+    signup(client)
+    bid = business(settings)['id']
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE businesses SET plan='pro',subscription_status='active',brief='US founders'")
+        db.execute("INSERT INTO runs(id,business_id,kind,started_at,finished_at,status,found) VALUES "
+                   "('r1',?,'search',?,?,'ok',12)", (bid, (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), now()))
+    page = client.get('/app').text
+    assert '>Find people</button>' in page
+    assert 'Last search: found 12' in page and 'h ago' in page
+    assert 'T0' not in page and '+00:00' not in page  # never the raw ISO timestamp
 
 
 def test_public_pages_and_unsubscribe(client, settings):
@@ -425,3 +453,34 @@ def test_mailbox_passwords_encrypted_preserved_and_not_echoed(client, settings):
     with connect(settings.db_path) as db:
         logs = str([tuple(row) for row in db.execute('SELECT * FROM log')])
     assert 'SMTP-PRIVATE-PASSWORD' not in logs and 'IMAP-PRIVATE-PASSWORD' not in logs
+
+
+# --- favicon and caching (docs/agent-prompts/15-hotfix-favicon-search.md) ---
+
+def test_favicon_route_serves_an_image_with_a_week_of_caching(client):
+    response = client.get('/favicon.ico')
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('image/')
+    assert response.headers['cache-control'] == 'public, max-age=604800'
+
+
+def test_every_page_declares_an_icon(client):
+    page = client.get('/').text
+    assert 'rel="icon"' in page
+    assert 'rel="apple-touch-icon"' in page
+
+
+def test_static_assets_are_cacheable_but_html_and_api_are_not():
+    from app.main import static_cache_control
+    assert static_cache_control('/static/htmx.min.js') == 'public, max-age=31536000, immutable'
+    assert static_cache_control('/static/fonts/inter-400.woff2') == 'public, max-age=31536000, immutable'
+    assert static_cache_control('/static/style.css') == 'public, max-age=3600'
+    assert static_cache_control('/favicon.ico') == 'public, max-age=604800'
+    assert static_cache_control('/') == 'no-store'
+    assert static_cache_control('/app') == 'no-store'
+    assert static_cache_control('/health') == 'no-store'
+
+
+def test_static_css_is_cacheable_and_html_still_is_not(client):
+    assert 'no-store' not in client.get('/static/style.css').headers['cache-control']
+    assert client.get('/').headers['cache-control'] == 'no-store'

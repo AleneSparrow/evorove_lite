@@ -23,7 +23,7 @@ def test_search_is_active_pro_only(client, settings, monkeypatch, plan, status, 
     page = client.get('/app')
     assert ('>Find people</button>' in page.text) == allowed
     if not allowed:
-        assert 'Lead search is included in Pro' in page.text
+        assert 'Lead search is in Pro' in page.text
         assert 'href="/app/billing"' in page.text
     for url in ('/app/search-preview', '/app/search-preview/status'):
         assert client.get(url).status_code == (200 if allowed else 403)

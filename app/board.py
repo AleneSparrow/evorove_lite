@@ -48,6 +48,26 @@ def last_search(settings, business_id):
     return dict(row) if row else None
 
 
+def relative_time(value, moment=None):
+    """A short, human time for the board -- never the raw ISO timestamp."""
+    try:
+        stamp = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return ''
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    seconds = max(0, int(((moment or datetime.now(timezone.utc)) - stamp).total_seconds()))
+    if seconds < 60:
+        return 'just now'
+    minutes = seconds // 60
+    if minutes < 60:
+        return f'{minutes} min ago'
+    hours = minutes // 60
+    if hours < 24:
+        return f'{hours} h ago'
+    return f'{hours // 24} d ago'
+
+
 def save_settings(settings, business_id, fields):
     values = {key: fields.get(key, '').strip() for key in (
         'offer_text', 'payment_link', 'postal_address', 'sender_name', 'smtp_host', 'smtp_user',
