@@ -217,9 +217,9 @@ def _email_kind(email, website):
     email_kind to store: "" for the classic owner@company-domain address,
     "company" for a generic mailbox (info@, hello@, ...) on the company's
     own domain, "personal_free" for a personal address at a free provider --
-    a small business's owner using their own gmail is normal, and the caller
-    has already confirmed the address is written on the company's own site
-    before asking here."""
+    normal for an individual seller or a small shop of any kind, B2B or B2C,
+    and the caller has already confirmed the address is written on the
+    company's own site before asking here."""
     local, _, domain = email.partition("@")
     domain = domain.lower().removeprefix("www.")
     host = _host(website)
