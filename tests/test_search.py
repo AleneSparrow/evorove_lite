@@ -376,6 +376,38 @@ def test_role_on_a_page_that_is_not_about_or_team_is_not_used():
     assert search._role_from_pages(pages, "Jane Alvarez") is None
 
 
+# --- the search query (docs/agent-prompts/16, "any seller" update) --------
+
+def test_queries_have_no_small_business_wording():
+    segments = [{"label": "US plumbing company owners", "channel": "industry_sites"}]
+    for query in search._queries(segments):
+        assert "small business" not in query.lower()
+
+
+def test_queries_add_the_role_phrase_for_a_business_segment():
+    segments = [{"label": "US plumbing company owners", "channel": "industry_sites"}]
+    [query] = search._queries(segments)
+    assert query == 'US plumbing company owners owner OR founder OR "head of sales" United States'
+
+
+def test_queries_drop_the_role_phrase_for_an_individual_seller_segment():
+    segments = [{"label": "Independent wedding photographers", "channel": "forums"}]
+    [query] = search._queries(segments)
+    assert query == "Independent wedding photographers forum United States"
+    assert "owner" not in query and "founder" not in query
+
+
+@pytest.mark.parametrize("channel,expected", [
+    ("forums", "Freelance plumbers forum United States"),
+    ("news", "Freelance plumbers news United States"),
+    ("business_listing", "Freelance plumbers business directory United States"),
+    ("industry_sites", "Freelance plumbers United States"),
+])
+def test_queries_use_a_one_word_signal_per_channel(channel, expected):
+    segments = [{"label": "Freelance plumbers", "channel": channel}]
+    assert search._queries(segments) == [expected]
+
+
 # --- the funnel (docs/agent-prompts/16) -------------------------------------
 
 def test_funnel_is_recorded_on_the_run_and_counts_duplicates(db, monkeypatch):

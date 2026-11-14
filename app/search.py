@@ -46,6 +46,16 @@ GENERIC = set("info support sales contact hello office admin team enquiries inqu
 FREE_MAIL = {"gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "hotmail.com", "live.com", "icloud.com", "aol.com", "proton.me", "protonmail.com"}
 ROLE_RE = re.compile(r"\b(co-founder|cofounder|founder|co-owner|owner|ceo|president|managing partner|proprietor|principal|director|head of sales|vp of sales|vice president of sales|sales director|chief revenue officer)\b", re.I)
 COMMERCIAL_RE = re.compile(r"\$\d|\b(?:discount|guarantee|warranty|refund)\b", re.I)
+# A segment whose own label names individual/freelance sellers rather than a
+# business with a hierarchy: "owner OR founder OR head of sales" has nothing
+# to find there, so the search query leaves the role phrase out.
+INDIVIDUAL_SELLER_RE = re.compile(
+    r"\b(freelance\w*|independent|self-employed|individual|sole proprietor(?:ship)?|"
+    r"solo(?:preneur)?|artisan|craftspe(?:rson|ople)|gig worker|private (?:tutor|coach|chef|driver)|"
+    r"personal trainer)\b", re.I)
+# A one-word topical nudge per channel, used only in the search query, never
+# as a replacement for the channel itself.
+CHANNEL_SIGNALS = {"forums": "forum", "news": "news", "business_listing": "business directory"}
 LEADING = set("our the my your this a an meet read contact about get learn".split())
 NAME_STOP = {"contact us", "about us", "our team", "read more", "learn more", "privacy policy"}
 PAIN_STOP = set("""
@@ -310,12 +320,17 @@ def _signal_segment(segments, rows):
 
 
 def _queries(segments):
+    """One query per segment: its label, a one-word nudge for the channel it
+    came from, who to look for (skipped for a segment of individual or
+    freelance sellers -- they have no "owner" or "head of sales" to find),
+    and the country. No business-size wording: the client is any seller --
+    B2B, B2C, an individual, any niche."""
     lines = []
     for segment in segments:
         label = segment["label"]
-        lines.append(f'{label} owner OR founder OR "head of sales" small business United States')
-        extra = {"forums": "forum", "news": "news"}.get(segment["channel"], "")
-        lines.append((f"{label} in the United States" if segment["channel"] == "business_listing" else f"{label} {extra} United States").strip())
+        signal = CHANNEL_SIGNALS.get(segment["channel"], "")
+        role = "" if INDIVIDUAL_SELLER_RE.search(label) else 'owner OR founder OR "head of sales"'
+        lines.append(" ".join(part for part in (label, signal, role, "United States") if part))
     return lines
 
 
