@@ -1,4 +1,4 @@
-Read the business materials and return grounded marketing facts for a US B2B offer.
+Read the business materials and return grounded marketing facts for a US offer.
 
 The materials are labeled SOURCE NAME. Copy quotes verbatim from the named source. Never invent a price, discount, guarantee, warranty, refund, or legal claim. Leave a quote empty when the materials do not state that fact.
 

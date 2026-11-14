@@ -62,7 +62,7 @@ class Messages:
         system = kwargs["system"]
         if system.startswith("Read the business materials"):
             body = self.offer
-        elif system.startswith("Find US small"):
+        elif system.startswith("Find sellers"):
             body = {"candidates": self.candidates}
         elif system.startswith("Read one company site"):
             body = self.person
@@ -136,7 +136,7 @@ def test_grounded_person_is_inserted_cold(db, monkeypatch):
     assert row["evidence_quote"] in PAGE
     assert search_run(db)["status"] == "ok" and search_run(db)["found"] == 1
     assert search_run(db)["tokens_in"] == 30 and search_run(db)["tokens_out"] == 12
-    search_call = next(call for call in messages.calls if call["system"].startswith("Find US small"))
+    search_call = next(call for call in messages.calls if call["system"].startswith("Find sellers"))
     assert search_call["tools"][0]["max_uses"] == 5
     assert search_call["tools"][0]["type"] == "web_search_20250305"
     assert "US plumbing company owners" in search_call["messages"][0]["content"]
@@ -408,6 +408,49 @@ def test_queries_use_a_one_word_signal_per_channel(channel, expected):
     assert search._queries(segments) == [expected]
 
 
+# --- tolerant segment matching (docs/agent-prompts/17) ----------------------
+
+TWO_SEGMENTS = [{"label": "US plumbing company owners", "channel": "industry_sites"},
+                {"label": "Field service owners", "channel": "industry_sites"}]
+
+
+def test_segment_label_matches_exactly_casefolded():
+    assert search._segment_label(TWO_SEGMENTS, "us plumbing company owners") == "US plumbing company owners"
+
+
+def test_segment_label_accepts_the_whole_search_query_the_model_echoed_back():
+    [query] = search._queries([TWO_SEGMENTS[0]])
+    assert search._segment_label(TWO_SEGMENTS, query) == "US plumbing company owners"
+
+
+def test_segment_label_with_two_segments_and_no_match_is_none():
+    assert search._segment_label(TWO_SEGMENTS, "Rural contractors") is None
+
+
+def test_segment_label_with_one_segment_and_no_match_falls_back_to_it():
+    [only] = [TWO_SEGMENTS[0]]
+    assert search._segment_label([only], "something unrelated") == only["label"]
+
+
+def test_candidate_with_the_full_query_as_segment_is_accepted_into_the_right_label(db, monkeypatch):
+    [query] = search._queries([{"label": "US plumbing company owners", "channel": "business_listing"}])
+    candidate = dict(CANDIDATE, segment=query)
+    install(monkeypatch, Messages(candidates=[candidate]))
+    found = search.run_search(business(db))
+    assert len(found) == 1
+    assert found[0]["segment"] == "US plumbing company owners"
+
+
+def test_candidate_with_an_unrelated_segment_and_two_segments_is_bad_segment(db, monkeypatch):
+    candidate = dict(CANDIDATE, segment="Rural contractors nobody mentioned")
+    install(monkeypatch, Messages(candidates=[candidate]))
+    search.run_search(business(db))
+    assert people(db) == []
+    with connect(db) as database:
+        row = dict(database.execute("SELECT funnel FROM runs WHERE kind='search'").fetchone())
+    assert json.loads(row["funnel"])["bad_segment"] == 1
+
+
 # --- the funnel (docs/agent-prompts/16) -------------------------------------
 
 def test_funnel_is_recorded_on_the_run_and_counts_duplicates(db, monkeypatch):
@@ -424,6 +467,33 @@ def test_funnel_is_recorded_on_the_run_and_counts_duplicates(db, monkeypatch):
     assert funnel["duplicate_or_suppressed"] == 1
 
 
+def test_funnel_is_written_when_the_scheduler_already_owns_the_run(db, monkeypatch):
+    """The scheduler claims the run row and sets current_run_id before
+    calling run_search (app/scheduler.py:Scheduler.execute), so run_search
+    does not own it and must not skip _finish without still writing the
+    funnel -- otherwise the board falls back to "No candidates came back"
+    even though candidates did come back and were all rejected."""
+    from app.db import current_run_id
+
+    bid = business(db)
+    run_id = search._open_run(search.load(), bid)
+    candidate = dict(CANDIDATE, segment="Rural contractors nobody mentioned")
+    install(monkeypatch, Messages(candidates=[candidate]))
+    token = current_run_id.set(run_id)
+    try:
+        assert search.run_search(bid) == []
+    finally:
+        current_run_id.reset(token)
+    with connect(db) as database:
+        row = dict(database.execute("SELECT funnel FROM runs WHERE id=?", (run_id,)).fetchone())
+    funnel = json.loads(row["funnel"])
+    assert funnel["returned"] == 1
+    assert funnel["bad_segment"] == 1
+    checked, reason = board.funnel_summary(row["funnel"])
+    assert checked == 1
+    assert reason == search.FUNNEL_REASONS["bad_segment"]
+
+
 def test_funnel_summary_picks_the_most_common_reason():
     funnel_json = json.dumps({"returned": 23, "no_role": 2, "email_other_domain": 15, "accepted": 0})
     checked, reason = board.funnel_summary(funnel_json)
@@ -436,29 +506,49 @@ def test_funnel_summary_handles_a_missing_or_empty_funnel():
     assert board.funnel_summary('{}') == (0, '')
 
 
-def test_client_zero_seeds_the_owner_brief(db, monkeypatch):
+def test_prompts_have_no_b2b_or_small_business_wording_that_narrows_the_audience():
+    from pathlib import Path
+    prompts_dir = Path(search.__file__).parent / "prompts"
+    for path in prompts_dir.glob("*.md"):
+        text = path.read_text().lower()
+        assert "b2b service compan" not in text, path.name
+        assert "small and mid-size" not in text, path.name
+
+
+def test_materials_for_has_no_client_zero_injection():
+    assert not hasattr(search, "CLIENT_ZERO_BRIEF")
+    business_row = {"brief": "Evorove is for anyone who sells something.", "offer_text": "Carries a sale through closing."}
+    rows = search.materials_for(business_row)
+    assert rows == [("brief", "Evorove is for anyone who sells something."),
+                     ("offer_text", "Carries a sale through closing.")]
+
+
+def test_client_zero_reads_its_own_brief_and_offer_text(db, monkeypatch):
     offer = {
-        "product_quote": "finds likely buyers on the open web", "product_source": "service.txt",
-        "price_quote": "$199/month", "price_source": "service.txt",
-        "place_quote": "", "place_source": "", "promotion_quote": "", "promotion_source": "",
+        "product_quote": "finds likely buyers on the open web", "product_source": "brief",
+        "price_quote": "", "price_source": "", "place_quote": "", "place_source": "",
+        "promotion_quote": "", "promotion_source": "",
         "segments": [
-            {"label": "US B2B businesses with high-value deals",
-             "evidence_quote": "US B2B businesses with high-value deals that want to replace or avoid a sales team.",
-             "source_name": "service.txt", "channel": "industry_sites"},
-            {"label": "Owners who want a sales conversation carried through closing",
-             "evidence_quote": "carries the sales conversation through closing.",
-             "source_name": "service.txt", "channel": "business_listing"},
+            {"label": "Anyone who sells something",
+             "evidence_quote": "Evorove is for anyone who sells something.",
+             "source_name": "brief", "channel": "industry_sites"},
+            {"label": "Sellers who want a sale carried through closing",
+             "evidence_quote": "carries a sale through closing.",
+             "source_name": "offer_text", "channel": "business_listing"},
         ],
     }
     messages = Messages(offer=offer, candidates=[])
     install(monkeypatch, messages)
-    bid = business(db, brief=None, bid="client-zero")
+    bid = business(db, brief="Evorove is for anyone who sells something. It finds likely buyers on the open web.",
+                    bid="client-zero")
+    with connect(db) as database:
+        database.execute("UPDATE businesses SET offer_text=? WHERE id=?", ("Evorove carries a sale through closing.", bid))
     monkeypatch.setenv("CLIENT_ZERO_BUSINESS_ID", bid)
     assert search.run_search(bid) == []
     offer_user = messages.calls[0]["messages"][0]["content"]
-    assert "SOURCE NAME: service.txt" in offer_user
-    assert "Starter is $199/month" in offer_user and "Pro is $499/month" in offer_user
-    assert "7-day free trial" not in offer_user
+    assert "SOURCE NAME: brief" in offer_user and "SOURCE NAME: offer_text" in offer_user
+    assert "service.txt" not in offer_user
+    assert "$199" not in offer_user and "$499" not in offer_user
     assert search_run(db)["status"] == "ok"
 
 
