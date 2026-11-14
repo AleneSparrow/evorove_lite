@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -216,14 +217,29 @@ def test_board_hero_action_hints_at_settings_when_there_is_no_brief(client, sett
 def test_board_hero_action_shows_the_last_search_in_relative_time(client, settings):
     signup(client)
     bid = business(settings)['id']
+    started_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     with connect(settings.db_path) as db:
         db.execute("UPDATE businesses SET plan='pro',subscription_status='active',brief='US founders'")
         db.execute("INSERT INTO runs(id,business_id,kind,started_at,finished_at,status,found) VALUES "
-                   "('r1',?,'search',?,?,'ok',12)", (bid, (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), now()))
+                   "('r1',?,'search',?,?,'ok',12)", (bid, started_at, now()))
     page = client.get('/app').text
     assert '>Find people</button>' in page
     assert 'Last search: found 12' in page and 'h ago' in page
-    assert 'T0' not in page and '+00:00' not in page  # never the raw ISO timestamp
+    assert started_at not in page  # never the raw ISO timestamp
+
+
+def test_board_shows_the_most_common_reason_in_plain_words_when_nobody_was_found(client, settings):
+    signup(client)
+    bid = business(settings)['id']
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE businesses SET plan='pro',subscription_status='active',brief='US founders'")
+        db.execute("INSERT INTO runs(id,business_id,kind,started_at,finished_at,status,found,funnel) VALUES "
+                   "('r2',?,'search',?,?,'ok',0,?)",
+                   (bid, now(), now(), json.dumps({'returned': 23, 'email_other_domain': 15, 'no_role': 3})))
+    page = client.get('/app').text
+    assert 'Checked 23 companies' in page
+    assert 'none had a public owner email' in page
+    assert 'email_other_domain' not in page
 
 
 def test_public_pages_and_unsubscribe(client, settings):

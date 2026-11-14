@@ -1,4 +1,5 @@
 """Tenant-scoped board queries and owner configuration."""
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -6,6 +7,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException
 from itsdangerous import URLSafeSerializer, BadSignature
 
+from . import search
 from .db import connect, now
 from .settings import encrypt_password
 
@@ -66,6 +68,19 @@ def relative_time(value, moment=None):
     if hours < 24:
         return f'{hours} h ago'
     return f'{hours // 24} d ago'
+
+
+def funnel_summary(funnel_json):
+    """Companies checked and the most common rejection reason, in plain
+    words -- never the technical key -- for a search that found nobody."""
+    try:
+        counts = json.loads(funnel_json or '{}')
+    except (TypeError, ValueError):
+        counts = {}
+    checked = int(counts.get('returned') or 0)
+    reasons = {key: value for key, value in counts.items() if key in search.FUNNEL_REASONS and value}
+    reason = search.FUNNEL_REASONS[max(reasons, key=reasons.get)] if reasons else ''
+    return checked, reason
 
 
 def save_settings(settings, business_id, fields):

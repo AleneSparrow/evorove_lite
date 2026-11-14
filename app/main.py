@@ -97,6 +97,7 @@ def create_app(settings=None, *, scheduler_enabled=True):
     app = FastAPI(lifespan=lifespan)
     templates = Jinja2Templates(directory=str(ROOT / "app/templates"))
     templates.env.filters["relative_time"] = board.relative_time
+    templates.env.filters["funnel_summary"] = board.funnel_summary
     app.mount("/static", StaticFiles(directory=ROOT / "app/static"), name="static")
 
     def apply_security_headers(response, cache_control="no-store"):

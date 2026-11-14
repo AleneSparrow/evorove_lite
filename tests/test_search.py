@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 
-from app import search
+from app import board, search
 from app.db import connect, migrate, now
 
 BRIEF = (
@@ -310,6 +310,130 @@ def test_clean_name_without_company_words_is_kept(db, monkeypatch):
     install(monkeypatch, Messages(person=person, candidates=[candidate]), BETA_PAGE)
     found = search.run_search(business(db))
     assert found[0]["name"] == "Mark Stone"
+
+
+# --- the small-business email relaxations (docs/agent-prompts/16) ---------
+
+def test_generic_email_on_the_companys_own_domain_is_accepted(db, monkeypatch):
+    person = dict(PERSON, email="info@acme.example")
+    page = PAGE.replace("jane.alvarez@acme.example", "info@acme.example")
+    install(monkeypatch, Messages(person=person), page)
+    found = search.run_search(business(db))
+    assert len(found) == 1 and found[0]["email"] == "info@acme.example"
+    assert people(db)[0]["email_kind"] == "company"
+
+
+def test_generic_email_on_another_domain_is_rejected(db, monkeypatch):
+    person = dict(PERSON, email="info@othercompany.com")
+    page = PAGE.replace("jane.alvarez@acme.example", "info@othercompany.com")
+    install(monkeypatch, Messages(person=person), page)
+    assert search.run_search(business(db)) == []
+    assert people(db) == []
+
+
+def test_free_mail_written_on_the_companys_own_site_is_accepted(db, monkeypatch):
+    person = dict(PERSON, email="jane.alvarez@gmail.com")
+    page = PAGE.replace("jane.alvarez@acme.example", "jane.alvarez@gmail.com")
+    install(monkeypatch, Messages(person=person), page)
+    found = search.run_search(business(db))
+    assert len(found) == 1 and found[0]["email"] == "jane.alvarez@gmail.com"
+    assert people(db)[0]["email_kind"] == "personal_free"
+
+
+def test_free_mail_not_written_on_the_page_is_rejected(db, monkeypatch):
+    person = dict(PERSON, email="jane.alvarez@gmail.com")
+    install(monkeypatch, Messages(person=person), PAGE)  # PAGE only has the acme.example address
+    assert search.run_search(business(db)) == []
+    assert people(db) == []
+
+
+def test_email_kind_direct_cases():
+    assert search._email_kind("jane@acme.example", "https://acme.example") == ""
+    assert search._email_kind("info@acme.example", "https://acme.example") == "company"
+    assert search._email_kind("jane@gmail.com", "https://acme.example") == "personal_free"
+    assert search._email_kind("info@othercompany.com", "https://acme.example") is None
+    assert search._email_kind("jane@othercompany.com", "https://acme.example") is None
+
+
+def test_pain_grounded_accepts_60_percent_of_keywords_and_rejects_40_percent():
+    pain = "alpha beta gamma delta epsilon"
+    assert search._pain_grounded(pain, "The report mentions alpha, beta and gamma in the notes.") is True
+    assert search._pain_grounded(pain, "The report mentions alpha and beta in the notes.") is False
+
+
+def test_pain_grounded_requires_every_keyword_below_two():
+    assert search._pain_grounded("alpha", "nothing matches here") is False
+    assert search._pain_grounded("alpha", "the word alpha is right here") is True
+
+
+def test_role_found_near_the_name_on_the_about_page_is_accepted():
+    pages = [("https://acme.example/about", "Meet the team. Jane Alvarez is the proud owner of this shop.")]
+    assert search._role_from_pages(pages, "Jane Alvarez") is not None
+
+
+def test_role_on_a_page_that_is_not_about_or_team_is_not_used():
+    pages = [("https://acme.example/contact", "Jane Alvarez is the owner.")]
+    assert search._role_from_pages(pages, "Jane Alvarez") is None
+
+
+# --- the search query (docs/agent-prompts/16, "any seller" update) --------
+
+def test_queries_have_no_small_business_wording():
+    segments = [{"label": "US plumbing company owners", "channel": "industry_sites"}]
+    for query in search._queries(segments):
+        assert "small business" not in query.lower()
+
+
+def test_queries_add_the_role_phrase_for_a_business_segment():
+    segments = [{"label": "US plumbing company owners", "channel": "industry_sites"}]
+    [query] = search._queries(segments)
+    assert query == 'US plumbing company owners owner OR founder OR "head of sales" United States'
+
+
+def test_queries_drop_the_role_phrase_for_an_individual_seller_segment():
+    segments = [{"label": "Independent wedding photographers", "channel": "forums"}]
+    [query] = search._queries(segments)
+    assert query == "Independent wedding photographers forum United States"
+    assert "owner" not in query and "founder" not in query
+
+
+@pytest.mark.parametrize("channel,expected", [
+    ("forums", "Freelance plumbers forum United States"),
+    ("news", "Freelance plumbers news United States"),
+    ("business_listing", "Freelance plumbers business directory United States"),
+    ("industry_sites", "Freelance plumbers United States"),
+])
+def test_queries_use_a_one_word_signal_per_channel(channel, expected):
+    segments = [{"label": "Freelance plumbers", "channel": channel}]
+    assert search._queries(segments) == [expected]
+
+
+# --- the funnel (docs/agent-prompts/16) -------------------------------------
+
+def test_funnel_is_recorded_on_the_run_and_counts_duplicates(db, monkeypatch):
+    # Same website and email found twice (messy web-search results do this):
+    # the second is a same-run duplicate, not a second distinct company.
+    second = dict(CANDIDATE, company="Acme Plumbing LLC")
+    install(monkeypatch, Messages(candidates=[CANDIDATE, second]))
+    search.run_search(business(db))
+    with connect(db) as database:
+        row = dict(database.execute("SELECT funnel FROM runs WHERE kind='search'").fetchone())
+    funnel = json.loads(row["funnel"])
+    assert funnel["returned"] == 2
+    assert funnel["accepted"] == 1
+    assert funnel["duplicate_or_suppressed"] == 1
+
+
+def test_funnel_summary_picks_the_most_common_reason():
+    funnel_json = json.dumps({"returned": 23, "no_role": 2, "email_other_domain": 15, "accepted": 0})
+    checked, reason = board.funnel_summary(funnel_json)
+    assert checked == 23
+    assert reason == search.FUNNEL_REASONS["email_other_domain"]
+
+
+def test_funnel_summary_handles_a_missing_or_empty_funnel():
+    assert board.funnel_summary(None) == (0, '')
+    assert board.funnel_summary('{}') == (0, '')
 
 
 def test_client_zero_seeds_the_owner_brief(db, monkeypatch):
