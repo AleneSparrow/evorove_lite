@@ -507,6 +507,15 @@ def markdown_table(rows):
     return "\n".join(lines)
 
 
+def _error_text(exc):
+    """LLMRejected's class name alone ("LLMRejected") tells no one what the
+    model actually did wrong -- carry its message too, capped so it fits
+    the column. Other exceptions keep the plain class name, as before."""
+    if isinstance(exc, LLMRejected) and str(exc):
+        return f"LLMRejected: {exc}"[:200]
+    return type(exc).__name__
+
+
 def _finish(settings, run_id, status, found, error, funnel):
     with connect(settings.db_path) as db:
         db.execute("UPDATE runs SET status=?, found=?, error=?, funnel=?, finished_at=? WHERE id=?",
@@ -596,7 +605,7 @@ def run_search(business_id: str, *, limit: int = 20, dry_run: bool = False) -> l
         return accepted
     except Exception as exc:
         if owned:
-            _finish(settings, run_id, "failed", len(accepted), type(exc).__name__, funnel)
+            _finish(settings, run_id, "failed", len(accepted), _error_text(exc), funnel)
         else:
             _write_funnel(settings, run_id, funnel)
         raise

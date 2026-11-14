@@ -560,6 +560,21 @@ def test_missing_brief_fails_closed(db, monkeypatch):
     assert people(db) == []
 
 
+def test_llm_rejected_reason_reaches_runs_error(db, monkeypatch):
+    real = search.ask
+
+    def wrapped(*args, **kwargs):
+        if kwargs.get("purpose") == "web_search":
+            raise search.LLMRejected("response was truncated (max_tokens)")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(search, "ask", wrapped)
+    install(monkeypatch, Messages())
+    with pytest.raises(search.LLMRejected):
+        search.run_search(business(db))
+    assert search_run(db)["error"] == "LLMRejected: response was truncated (max_tokens)"
+
+
 def test_ungrounded_segments_do_not_search(db, monkeypatch):
     offer = json.loads(json.dumps(OFFER))
     offer["segments"][0]["evidence_quote"] = "not in the brief"

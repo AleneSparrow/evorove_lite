@@ -1,5 +1,6 @@
 """The only Anthropic call. Tokens are added to the current runs row."""
 import json
+import logging
 import re
 import time
 from contextvars import ContextVar
@@ -12,7 +13,10 @@ from .settings import load
 DEFAULT_DAILY = 400_000
 DEFAULT_RUN = 150_000
 RETRYABLE = {429, 500, 502, 503, 504, 529}
+MAX_TOKENS_WEB_SEARCH = 16000
+MAX_PAUSE_CONTINUATIONS = 3
 source_text = ContextVar("llm_source_text", default="")
+log = logging.getLogger(__name__)
 
 
 class BudgetExhausted(Exception):
@@ -86,18 +90,61 @@ def _json_text(text):
 
 
 def _message_parts(message):
-    text, corpus = [], []
+    """The JSON answer is the LAST text block, not the concatenation of all
+    of them -- a model that narrates ("Let me search...") before searching
+    leaves an earlier text block that is not JSON at all."""
+    texts, corpus = [], []
     for block in _field(message, "content") or []:
         kind = _field(block, "type")
         if kind == "text":
-            text.append(_field(block, "text") or "")
+            texts.append(_field(block, "text") or "")
         elif kind == "web_search_tool_result":
             content = _field(block, "content")
             if isinstance(content, list):
                 for item in content:
                     corpus.append(str(_field(item, "title") or ""))
                     corpus.append(str(_field(item, "url") or ""))
-    return "".join(text), "\n".join(part for part in corpus if part)
+    return (texts[-1] if texts else ""), "\n".join(part for part in corpus if part)
+
+
+def _last_balanced_json(text):
+    """The last top-level {...} span in text, scanning for brace balance --
+    a fallback for when stray prose survives around the JSON."""
+    best, depth, start = None, 0, None
+    for index, char in enumerate(text or ""):
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                best = text[start:index + 1]
+    return best
+
+
+def _coerce_nulls(schema, value):
+    """A model that writes null for a string field (instead of "") should
+    not sink the whole response -- coerce before the schema check."""
+    if not isinstance(schema, dict):
+        return value
+    expected = schema.get("type")
+    types = expected if isinstance(expected, list) else [expected]
+    if value is None and "string" in types and "null" not in types:
+        return ""
+    if isinstance(value, dict) and "object" in types:
+        props = schema.get("properties") or {}
+        return {key: (_coerce_nulls(props[key], item) if key in props else item) for key, item in value.items()}
+    if isinstance(value, list) and "array" in types:
+        item_schema = schema.get("items")
+        if item_schema is not None:
+            return [_coerce_nulls(item_schema, item) for item in value]
+    return value
+
+
+def _reject(purpose, reason, stop_reason, text):
+    log.warning("llm rejected purpose=%s reason=%s stop=%s text=%r", purpose, reason, stop_reason, (text or "")[:500])
+    raise LLMRejected(reason)
 
 
 def _matches(schema, value):
@@ -139,37 +186,70 @@ def ask(system: str, user: str, *, schema: dict | None = None, web_search: bool 
     api_key = settings.get("ANTHROPIC_API_KEY")
     model = settings.get("ANTHROPIC_MODEL")
     if not api_key or not model:
-        raise LLMRejected("ANTHROPIC_API_KEY and ANTHROPIC_MODEL are required")
+        _reject(purpose, "ANTHROPIC_API_KEY and ANTHROPIC_MODEL are required", None, "")
     daily_spent, run_spent = _spent(settings, current_run_id.get())
     if daily_spent >= _number(settings, "DAILY_TOKEN_BUDGET", DEFAULT_DAILY) or run_spent >= _number(settings, "PER_RUN_TOKEN_BUDGET", DEFAULT_RUN):
         raise BudgetExhausted("token budget is spent")
-    kwargs = {"model": model, "max_tokens": 4096, "system": system, "messages": [{"role": "user", "content": user}]}
-    if schema is not None:
-        kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
-    if web_search:
-        kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses,
-                            "user_location": {"type": "approximate", "country": "US"}}]
-    delay = 0.5
-    for attempt in range(3):
-        try:
-            message = _client(api_key).messages.create(**kwargs)
-            break
-        except anthropic.APIStatusError as exc:
-            if exc.status_code not in RETRYABLE or attempt == 2:
-                raise
-        except anthropic.APIConnectionError:
-            if attempt == 2:
-                raise
-        _sleep(delay)
-        delay *= 2
-    incoming, outgoing = _tokens(_field(message, "usage"))
-    _charge(settings, purpose, incoming, outgoing)
-    text, corpus = _message_parts(message)
-    source_text.set(corpus)
+    messages = [{"role": "user", "content": user}]
+    max_tokens = 4096
+    bumped = False
+    continuations = 0
+    corpus_chunks = []
+    text = ""
+    stop_reason = None
+    while True:
+        kwargs = {"model": model, "max_tokens": max_tokens, "system": system, "messages": messages}
+        if schema is not None:
+            kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+        if web_search:
+            kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses,
+                                "user_location": {"type": "approximate", "country": "US"}}]
+        delay = 0.5
+        for attempt in range(3):
+            try:
+                message = _client(api_key).messages.create(**kwargs)
+                break
+            except anthropic.APIStatusError as exc:
+                if exc.status_code not in RETRYABLE or attempt == 2:
+                    raise
+            except anthropic.APIConnectionError:
+                if attempt == 2:
+                    raise
+            _sleep(delay)
+            delay *= 2
+        incoming, outgoing = _tokens(_field(message, "usage"))
+        _charge(settings, purpose, incoming, outgoing)
+        stop_reason = _field(message, "stop_reason")
+        text, chunk = _message_parts(message)
+        if chunk:
+            corpus_chunks.append(chunk)
+        if stop_reason == "max_tokens" and web_search and not bumped:
+            bumped = True
+            max_tokens = MAX_TOKENS_WEB_SEARCH
+            continue
+        if stop_reason == "pause_turn" and continuations < MAX_PAUSE_CONTINUATIONS:
+            continuations += 1
+            messages = messages + [{"role": "assistant", "content": _field(message, "content") or []}]
+            continue
+        break
+    source_text.set("\n".join(corpus_chunks))
+    if stop_reason == "max_tokens":
+        _reject(purpose, "response was truncated (max_tokens)", stop_reason, text)
+    candidate = _json_text(text)
     try:
-        payload = json.loads(_json_text(text))
+        payload = json.loads(candidate)
     except json.JSONDecodeError:
-        raise LLMRejected("model output was not JSON") from None
-    if not isinstance(payload, dict) or (schema is not None and not _matches(schema, payload)):
-        raise LLMRejected("model output did not match the schema")
+        fallback = _last_balanced_json(text)
+        try:
+            payload = json.loads(fallback) if fallback is not None else None
+        except json.JSONDecodeError:
+            payload = None
+        if payload is None:
+            _reject(purpose, "model output was not JSON", stop_reason, text)
+    if not isinstance(payload, dict):
+        _reject(purpose, "model output was not a JSON object", stop_reason, text)
+    if schema is not None:
+        payload = _coerce_nulls(schema, payload)
+        if not _matches(schema, payload):
+            _reject(purpose, "model output did not match the schema", stop_reason, text)
     return payload
