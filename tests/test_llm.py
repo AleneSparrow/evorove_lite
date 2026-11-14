@@ -172,6 +172,70 @@ def test_orphan_call_records_its_own_run(db, monkeypatch):
     assert row["tokens_in"] == 10 and row["tokens_out"] == 4
 
 
+def _block(kind, **attrs):
+    return type("Block", (), {"type": kind, **attrs})()
+
+
+def _response(content, stop_reason=None, usage=None):
+    return type("Message", (), {"content": content, "usage": usage or Usage(), "stop_reason": stop_reason})()
+
+
+class Scripted:
+    """A fake Anthropic Messages client that returns one prebuilt response
+    per call, in order -- for scenarios a single canned reply can't cover
+    (pause_turn continuations, a max_tokens retry)."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+
+def test_json_after_a_pre_search_text_block_is_still_parsed(db, monkeypatch):
+    content = [
+        _block("text", text="Let me search the web for this."),
+        _block("web_search_tool_result", content=[_block("", title="Acme", url="https://acme.example")]),
+        _block("text", text='{"ok": true}'),
+    ]
+    messages = Scripted([_response(content, stop_reason="end_turn")])
+    patch_anthropic(monkeypatch, messages)
+    assert llm.ask("system", "user", schema=SCHEMA, web_search=True, purpose="web_search") == {"ok": True}
+    assert "Acme" in llm.source_text.get()
+
+
+def test_pause_turn_continues_the_conversation_up_to_three_times(db, monkeypatch):
+    paused = _response([_block("text", text="still thinking...")], stop_reason="pause_turn")
+    final = _response([_block("text", text='{"ok": true}')], stop_reason="end_turn")
+    messages = Scripted([paused, final])
+    patch_anthropic(monkeypatch, messages)
+    assert llm.ask("system", "user", schema=SCHEMA, purpose="web_search") == {"ok": True}
+    assert len(messages.calls) == 2
+    assert messages.calls[1]["messages"][-1] == {"role": "assistant", "content": paused.content}
+
+
+def test_max_tokens_bumps_once_for_web_search_then_rejects(db, monkeypatch):
+    truncated = _response([_block("text", text='{"ok": tr')], stop_reason="max_tokens")
+    truncated_again = _response([_block("text", text='{"ok": tr')], stop_reason="max_tokens")
+    messages = Scripted([truncated, truncated_again])
+    patch_anthropic(monkeypatch, messages)
+    with pytest.raises(llm.LLMRejected, match="max_tokens"):
+        llm.ask("system", "user", schema=SCHEMA, web_search=True, purpose="web_search")
+    assert len(messages.calls) == 2
+    assert messages.calls[0]["max_tokens"] == 4096
+    assert messages.calls[1]["max_tokens"] == llm.MAX_TOKENS_WEB_SEARCH
+
+
+def test_null_in_a_string_field_is_coerced_to_empty_string(db, monkeypatch):
+    schema = {"type": "object", "additionalProperties": False, "required": ["ok", "note"],
+              "properties": {"ok": {"type": "boolean"}, "note": {"type": "string"}}}
+    messages = Messages('{"ok": true, "note": null}')
+    patch_anthropic(monkeypatch, messages)
+    assert llm.ask("system", "user", schema=schema, purpose="offer_reading") == {"ok": True, "note": ""}
+
+
 def _array_nodes(schema):
     """Every array-type node anywhere in a JSON schema tree: its own items,
     recursively, and every property of every object along the way."""
