@@ -17,15 +17,6 @@ from .settings import load
 log = logging.getLogger(__name__)
 last_report = ""
 CHANNELS = {"forums", "industry_sites", "news", "business_listing"}
-# Copied from evorove_lead/owner-materials/service.txt (25 Oct 2026). Client 0 only.
-CLIENT_ZERO_BRIEF = (
-    "Evorove finds likely buyers on the open web and carries the sales conversation through closing.\n"
-    "It is for US B2B businesses with high-value deals that want to replace or avoid a sales team.\n"
-    "Evorove checks public fit, keeps a grounded reason, and shows the work on a CRM board.\n"
-    "Starter is $199/month: a sales agent for the customer's own contacts.\n"
-    "Pro is $499/month: Starter, plus a search for leads in the United States.\n"
-    "There is no free trial."
-)
 _STATE_LINES = """
 AL Alabama / AK Alaska / AZ Arizona / AR Arkansas / CA California / CO Colorado / CT Connecticut
 DE Delaware / DC District of Columbia / FL Florida / GA Georgia / HI Hawaii / ID Idaho / IL Illinois
@@ -98,7 +89,7 @@ FUNNEL_REASONS = {
 
 
 class OfferRejected(Exception):
-    """The brief did not produce two grounded US B2B segments."""
+    """The brief did not produce two grounded US segments."""
 
 
 class BriefMissing(Exception):
@@ -258,14 +249,12 @@ def _role_from_pages(pages, name):
     return None
 
 
-def materials_for(business, settings):
+def materials_for(business):
     rows = []
     if (business["brief"] or "").strip():
         rows.append(("brief", business["brief"].strip()))
     if (business["offer_text"] or "").strip():
         rows.append(("offer_text", business["offer_text"].strip()))
-    if settings.get("CLIENT_ZERO_BUSINESS_ID") == business["id"]:
-        rows.append(("service.txt", CLIENT_ZERO_BRIEF))
     return rows
 
 
@@ -332,6 +321,21 @@ def _queries(segments):
         role = "" if INDIVIDUAL_SELLER_RE.search(label) else 'owner OR founder OR "head of sales"'
         lines.append(" ".join(part for part in (label, signal, role, "United States") if part))
     return lines
+
+
+def _search_user_message(limit, facts, forbidden, segments):
+    """Give the model the labels on their own, verbatim, and group each
+    query under the label it was built from -- so a reply that names a
+    segment by echoing its label (rather than the whole query) is still
+    exact, and _segment_label's fallback only has to catch what a careless
+    answer did to that label."""
+    labels = "\n".join(f"- {segment['label']}" for segment in segments)
+    blocks = "\n".join(f"Queries for \"{segment['label']}\":\n- {query}"
+                        for segment, query in zip(segments, _queries(segments)))
+    return (f"What we sell, copied from the materials: {facts['product']}\n"
+            f"Do not invent or promise: {', '.join(forbidden)}.\n"
+            f"Return at most {limit} companies.\n"
+            f"Segments (use the label exactly as written):\n{labels}\n\n{blocks}")
 
 
 def fetch_text(url):
@@ -426,12 +430,28 @@ def _person(company, pages, website, corpus, forbidden, listed_url, funnel):
     return _accept_person(parsed, pages, website, corpus, listed_url, company, funnel)
 
 
+def _segment_label(segments, raw):
+    """Match tolerantly: an exact label first, then a label the model's
+    answer contains (it sometimes echoes the whole search query instead of
+    the bare label), then -- only when there is nowhere else it could be --
+    the one segment we had. Anything else is unmatched."""
+    folded = " ".join(str(raw or "").split()).casefold()
+    for segment in segments:
+        if segment["label"].casefold() == folded:
+            return segment["label"]
+    contained = [segment["label"] for segment in segments if segment["label"].casefold() in folded]
+    if contained:
+        return max(contained, key=len)
+    if len(segments) == 1:
+        return segments[0]["label"]
+    return None
+
+
 def _candidate(business, item, segments, corpus, forbidden, funnel):
     state = _us_state(item.get("us_state"))
     website = _site(item.get("website"))
     company = " ".join(str(item.get("company") or "").split())
-    labels = {segment["label"].casefold(): segment["label"] for segment in segments}
-    segment = labels.get(str(item.get("segment") or "").strip().casefold())
+    segment = _segment_label(segments, item.get("segment"))
     if not state:
         funnel["no_state"] += 1
         return None
@@ -493,6 +513,16 @@ def _finish(settings, run_id, status, found, error, funnel):
                    (status, found, error, json.dumps(funnel), now(), run_id))
 
 
+def _write_funnel(settings, run_id, funnel):
+    """When the scheduler already owns the run row (it set current_run_id
+    before calling us), only it finalizes status/found/finished_at -- but
+    the funnel it never computes itself, so we still have to record it here
+    or the board is left showing "No candidates came back" for a search
+    that did get candidates back."""
+    with connect(settings.db_path) as db:
+        db.execute("UPDATE runs SET funnel=? WHERE id=?", (json.dumps(funnel), run_id))
+
+
 def _open_run(settings, business_id):
     run_id = str(uuid4())
     with connect(settings.db_path) as db:
@@ -504,15 +534,13 @@ def _collect(settings, business, limit, dry_run):
     accepted = []
     funnel = Counter()
     try:
-        rows = materials_for(business, settings)
+        rows = materials_for(business)
         if not rows:
             raise BriefMissing("add a search brief first")
         facts, segments, forbidden = _read_offer(rows)
         if settings.get("MARKET_SIGNALS", "").strip().lower() in {"1", "true", "yes", "on"}:
             segments = _signal_segment(segments, rows)
-        user = (f"What we sell, copied from the materials: {facts['product']}\n"
-                f"Do not invent or promise: {', '.join(forbidden)}.\n"
-                f"Return at most {limit} companies.\nQueries:\n" + "\n".join(f"- {query}" for query in _queries(segments)))
+        user = _search_user_message(limit, facts, forbidden, segments)
         payload = ask(_prompt("search_queries.md"), user, schema=SEARCH_SCHEMA, web_search=True, max_uses=5, purpose="web_search")
         corpus = source_text.get()
         seen = set()
@@ -563,10 +591,14 @@ def run_search(business_id: str, *, limit: int = 20, dry_run: bool = False) -> l
             return accepted
         if owned:
             _finish(settings, run_id, "ok", len(accepted), None, funnel)
+        else:
+            _write_funnel(settings, run_id, funnel)
         return accepted
     except Exception as exc:
         if owned:
             _finish(settings, run_id, "failed", len(accepted), type(exc).__name__, funnel)
+        else:
+            _write_funnel(settings, run_id, funnel)
         raise
     finally:
         if dry_run:
